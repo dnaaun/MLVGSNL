@@ -1,0 +1,4 @@
+nltk==3.5
+pip-chill==1.0.0
+pycocotools==2.0.2
+torchvision==0.7.0
