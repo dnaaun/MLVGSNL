@@ -28,6 +28,9 @@ class PrecompDataset(Base):
     ):
         self.vocab = vocab
 
+        with open(os.path.join(data_path, 'caps_per_img.txt')) as f:
+            caps_per_img = int(f.read().strip())
+
         # captions
         self.captions = []
         with open(os.path.join(data_path, f"{data_split}_caps.txt"), "r") as f:
@@ -42,18 +45,15 @@ class PrecompDataset(Base):
                 os.path.join(data_path, f"{data_split}_ims.npy")
             )
         else:
-            self.images = np.zeros((self.length // 5, img_dim))
+            self.images = np.zeros((self.length // caps_per_img, img_dim))
 
         # each image can have 1 caption or 5 captions
-        if self.images.shape[0] != self.length:
-            self.im_div = 5
-            assert self.images.shape[0] * 5 == self.length
-        else:
-            self.im_div = 1
+        assert self.images.shape[0] * caps_per_img == self.length
+        self.caps_per_img = caps_per_img
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, int, int]:
         # image
-        img_id = index // self.im_div
+        img_id = index // self.caps_per_img
         image = torch.tensor(self.images[img_id])
         # caption
         caption = [
@@ -64,8 +64,7 @@ class PrecompDataset(Base):
         return image, torch_caption, index, img_id
 
     def __len__(self) -> int:
-        return 128
-        # return self.length
+        return self.length
 
 
 ImageData = torch.Tensor

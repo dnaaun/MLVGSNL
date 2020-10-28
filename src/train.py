@@ -1,5 +1,6 @@
 from typing import Collection, Any, List, Tuple, TypeVar, NewType, TypedDict
 from argparse import Namespace, ArgumentParser
+import tqdm
 import logging
 import os
 import pickle
@@ -24,7 +25,7 @@ def train(opt: Namespace, train_loader: "torch.utils.data.DataLoader['data.Batch
     model.train_start()
 
     end = time.time()
-    for i, train_data in enumerate(train_loader):
+    for i, train_data in enumerate(tqdm.tqdm(train_loader, desc='Training loop')):
         # Always reset to train mode
         model.train_start()
 
