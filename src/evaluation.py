@@ -1,14 +1,16 @@
 import os
 import pickle
 
-from typing import TYPE_CHECKING, Dict
+from typing import TYPE_CHECKING, Dict, Callable, Any, Optional, Tuple, overload, Union
+from typing_extensions import Literal
 import time
 import numpy as np  # type: ignore
 import torch
+from torch.utils.data import DataLoader
 from collections import OrderedDict
 
 from model import VGNSL
-from data import get_eval_loader
+from data import get_eval_loader, PrecompDataLoaderBatch, PrecompDatasetExample
 from vocab import Vocabulary
 from utils import generate_tree, clean_tree
 
@@ -69,8 +71,13 @@ class LogCollector:
 
 
 def encode_data(
-    model, data_loader, log_step=10, logging=print, vocab=None, stage="dev"
-):
+    model: VGNSL,
+    data_loader: DataLoader[PrecompDatasetExample, PrecompDataLoaderBatch],
+    log_step: int = 10,
+    logging: Callable[[Any], None] = print,
+    vocab: Optional[Vocabulary] = None,
+    stage: Literal["dev", "test", "train"] = "dev",
+) -> Tuple[np.ndarray, np.ndarray]:
     """Encode all images and captions loadable by `data_loader`
     """
     batch_time = AverageMeter()
@@ -143,7 +150,40 @@ def encode_data(
     return img_embs, cap_embs
 
 
-def i2t(images, captions, npts=None, measure="cosine", return_ranks=False):
+@overload
+def i2t(
+    images: torch.Tensor,
+    captions: torch.Tensor,
+    *,
+    return_ranks: Literal[False] = False,
+    npts: int = None,
+    measure: Literal["cosine"] = "cosine",
+) -> Tuple[float, float, float, float, float]:
+    ...
+
+
+@overload
+def i2t(
+    images: torch.Tensor,
+    captions: torch.Tensor,
+    *,
+    return_ranks: Literal[True],
+    npts: int = None,
+    measure: Literal["cosine"] = "cosine",
+) -> Tuple[Tuple[float, float, float, float, float], Tuple[float, float]]:
+    ...
+
+
+def i2t(
+    images: torch.Tensor,
+    captions: torch.Tensor,
+    npts: int = None,
+    measure: Literal["cosine"] = "cosine",
+    return_ranks: bool = False,
+) -> Union[
+    Tuple[Tuple[float, float, float, float, float], Tuple[float, float]],
+    Tuple[float, float, float, float, float],
+]:
     """
     Images->Text (Image Annotation)
     Images: (5N, K) matrix of images
@@ -179,15 +219,49 @@ def i2t(images, captions, npts=None, measure="cosine", return_ranks=False):
     r1 = 100.0 * len(np.where(ranks < 1)[0]) / len(ranks)
     r5 = 100.0 * len(np.where(ranks < 5)[0]) / len(ranks)
     r10 = 100.0 * len(np.where(ranks < 10)[0]) / len(ranks)
-    medr = np.floor(np.median(ranks)) + 1
-    meanr = ranks.mean() + 1
+    medr: float = np.floor(np.median(ranks)) + 1
+    meanr: float = ranks.mean() + 1
     if return_ranks:
         return (r1, r5, r10, medr, meanr), (ranks, top1)
     else:
         return (r1, r5, r10, medr, meanr)
 
 
-def t2i(images, captions, npts=None, measure="cosine", return_ranks=False):
+@overload
+def t2i(
+    images: torch.Tensor,
+    captions: torch.Tensor,
+    *,
+    return_ranks: Literal[False] = False,
+    npts: int = None,
+    measure: Literal["cosine"] = "cosine",
+) -> Tuple[float, float, float, float, float]:
+    ...
+
+
+@overload
+def t2i(
+    images: torch.Tensor,
+    captions: torch.Tensor,
+    *,
+    return_ranks: Literal[True],
+    npts: int = None,
+    measure: Literal["cosine"] = "cosine",
+) -> Tuple[Tuple[float, float, float, float, float], Tuple[float, float]]:
+    ...
+
+
+def t2i(
+    images: torch.Tensor,
+    captions: torch.Tensor,
+    *,
+    return_ranks: bool=False,
+    npts: int = None,
+    measure: Literal["cosine"] = "cosine",
+) -> Union[
+    Tuple[Tuple[float, float, float, float, float], Tuple[float, float]],
+    Tuple[float, float, float, float, float],
+]:
     """
     Text->Images (Image Search)
     Images: (5N, K) matrix of images
@@ -228,7 +302,7 @@ def t2i(images, captions, npts=None, measure="cosine", return_ranks=False):
 def test_trees(model_path: str):
     """ use the trained model to generate parse trees for text """
     # load model and options
-    checkpoint: 'CheckpointData' = torch.load(model_path, map_location="cpu")
+    checkpoint: "CheckpointData" = torch.load(model_path, map_location="cpu")
     opt = checkpoint["opt"]
 
     # load vocabulary used by the model

@@ -5,12 +5,14 @@ import os
 
 import torch
 import torch.utils.data as data
+from torch.utils.data import DataLoader
 
 if TYPE_CHECKING:
     from vocab import Vocabulary
 
+PrecompDatasetExample = Tuple[torch.Tensor, torch.Tensor, int, int]
 if TYPE_CHECKING:
-    Base = data.Dataset[Any]
+    Base = data.Dataset[PrecompDatasetExample]
 else:
     Base = data.Dataset
 
@@ -28,7 +30,7 @@ class PrecompDataset(Base):
     ):
         self.vocab = vocab
 
-        with open(os.path.join(data_path, 'caps_per_img.txt')) as f:
+        with open(os.path.join(data_path, "caps_per_img.txt")) as f:
             caps_per_img = int(f.read().strip())
 
         # captions
@@ -67,15 +69,10 @@ class PrecompDataset(Base):
         return self.length
 
 
-ImageData = torch.Tensor
-CaptionData = torch.Tensor
-Id = int
-ImgId = int
-
-Batch = Tuple[torch.Tensor, torch.Tensor, List[int], List[Id]]
+PrecompDataLoaderBatch = Tuple[torch.Tensor, torch.Tensor, List[int], List[int]]
 
 
-def collate_fn(data: List[Tuple[ImageData, CaptionData, Id, ImgId]]) -> Batch:
+def collate_fn(data: List[PrecompDatasetExample]) -> PrecompDataLoaderBatch:
     """ build mini-batch tensors from a list of (image, caption) tuples """
     # sort a data list by caption length
     data.sort(key=lambda x: len(x[1]), reverse=True)
@@ -98,9 +95,9 @@ def get_precomp_loader(
     num_workers: int = 2,
     load_img: bool = True,
     img_dim: int = 2048,
-) -> "torch.utils.data.DataLoader[Batch]":
+) -> "DataLoader[PrecompDatasetExample, PrecompDataLoaderBatch]":
     dset = PrecompDataset(data_path, data_split, vocab, load_img, img_dim)
-    data_loader = torch.utils.data.DataLoader(
+    data_loader: "DataLoader[PrecompDatasetExample, PrecompDataLoaderBatch]" = DataLoader(
         dataset=dset,
         batch_size=batch_size,
         shuffle=shuffle,
@@ -112,7 +109,10 @@ def get_precomp_loader(
 
 def get_train_loaders(
     data_path: str, vocab: "Vocabulary", batch_size: int, workers: int
-) -> Tuple["torch.utils.data.DataLoader[Batch]", "torch.utils.data.DataLoader[Batch]"]:
+) -> Tuple[
+    "DataLoader[PrecompDatasetExample, PrecompDataLoaderBatch]",
+    "DataLoader[PrecompDatasetExample, PrecompDataLoaderBatch]",
+]:
     train_loader = get_precomp_loader(
         data_path, "train", vocab, batch_size, True, workers
     )
@@ -128,7 +128,7 @@ def get_eval_loader(
     workers: int,
     load_img: bool = False,
     img_dim: int = 2048,
-) -> "torch.utils.data.DataLoader[Batch]":
+) -> "DataLoader[PrecompDatasetExample, PrecompDataLoaderBatch]":
     eval_loader = get_precomp_loader(
         data_path,
         split_name,

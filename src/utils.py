@@ -1,16 +1,24 @@
 import collections
+from argparse import Namespace
 from functools import reduce
 
 import torch
+from torch import Tensor
 import torch.nn as nn
+from typing import Sequence, Tuple, Union, List, TYPE_CHECKING
 
 
-class EmbeddingCombiner(nn.Module):
-    def __init__(self, *embeddings):
+if TYPE_CHECKING:
+    ModuleBase = nn.Module[Tensor]
+else:
+    ModuleBase = nn.Module
+
+class EmbeddingCombiner(nn.Module[Tensor]):
+    def __init__(self, *embeddings: ModuleBase):
         super().__init__()
         self.embeddings = nn.ModuleList(embeddings)
 
-    def forward(self, input):
+    def forward(self, input: Tensor) -> Tensor:
         return torch.cat([e(input) for e in self.embeddings], dim=-1)
 
 
@@ -20,12 +28,12 @@ def tree2list(tokens):
     list_stack.append(tree)
     stack_top = tree
     for token in tokens:
-        if token == '(':
+        if token == "(":
             new_span = []
             stack_top.append(new_span)
             list_stack.append(new_span)
             stack_top = new_span
-        elif token == ')':
+        elif token == ")":
             list_stack = list_stack[:-1]
             if len(list_stack) != 0:
                 stack_top = list_stack[-1]
@@ -38,32 +46,32 @@ def treelist2dict(tree, d):
     if type(tree) is str:
         return tree
     span_reprs = [treelist2dict(s, d) for s in tree]
-    d[' '.join(span_reprs)] = tree
-    return ' '.join(span_reprs)
+    d[" ".join(span_reprs)] = tree
+    return " ".join(span_reprs)
 
 
 def tree2str(tree):
     if type(tree) is str:
         return tree
     items = [tree2str(item) for item in tree]
-    return '( ' + ' '.join(items) + ' )'
+    return "( " + " ".join(items) + " )"
 
 
-def make_embeddings(opt, vocab_size, dim):
+def make_embeddings(opt: Namespace, vocab_size: int, dim: int) -> EmbeddingCombiner:
     init_embeddings = None
-    if hasattr(opt, 'vocab_init_embeddings'):
+    if hasattr(opt, "vocab_init_embeddings"):
         init_embeddings = torch.tensor(torch.load(opt.vocab_init_embeddings))
 
     emb = None
-    if opt.init_embeddings_type in ('override', 'partial'):
+    if opt.init_embeddings_type in ("override", "partial"):
         emb = nn.Embedding(vocab_size, dim, padding_idx=0)
         if init_embeddings is not None:
-            if opt.init_embeddings_type == 'override':
+            if opt.init_embeddings_type == "override":
                 emb.weight.data.copy_(init_embeddings)
             else:
-                assert opt.init_embeddings_type == 'partial'
-                emb.weight.data[:, :init_embeddings.size(1)] = init_embeddings
-    elif opt.init_embeddings_type == 'partial-fixed':
+                assert opt.init_embeddings_type == "partial"
+                emb.weight.data[:, : init_embeddings.size(1)] = init_embeddings
+    elif opt.init_embeddings_type == "partial-fixed":
         partial_dim = opt.init_embeddings_partial_dim
         emb1 = nn.Embedding(vocab_size, partial_dim, padding_idx=0)
         emb2 = nn.Embedding(vocab_size, dim - partial_dim, padding_idx=0)
@@ -79,8 +87,8 @@ def make_embeddings(opt, vocab_size, dim):
     return emb
 
 
-def concat_shape(*shapes):
-    output = []
+def concat_shape(*shapes: Union[int, Sequence[int]]) -> Tuple[int, ...]:
+    output: List[int] = []
     for s in shapes:
         if isinstance(s, collections.Sequence):
             output.extend(s)
@@ -89,36 +97,55 @@ def concat_shape(*shapes):
     return tuple(output)
 
 
-def broadcast(tensor, dim, size):
+def broadcast(tensor: Tensor, dim: int, size: int) -> Tensor:
     if dim < 0:
         dim += tensor.dim()
     assert tensor.size(dim) == 1
     shape = tensor.size()
-    return tensor.expand(concat_shape(shape[:dim], size, shape[dim+1:]))
+    return tensor.expand(concat_shape(shape[:dim], size, shape[dim + 1 :]))
 
 
-def add_dim(tensor, dim, size):
+def add_dim(tensor, dim: int, size: int) -> Tensor:
     return broadcast(tensor.unsqueeze(dim), dim, size)
 
 
-def cosine_sim(im, s):
-    """Cosine similarity between all the image and sentence pairs"""
+def cosine_sim(im: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+    """Cosine similarity between all the image and sentence pairs
+
+    Args:
+        im: (N,M)
+        s: (P,M)
+
+    Returns:
+        out: (N,M)
+    """
     return im.mm(s.t())
-    
-
-def l2norm(x, dim=-1):
-    return x / x.norm(2, dim=dim, keepdim=True).clamp(min=1e-6)
 
 
-def generate_tree(captions, tree_indices, pos, vocab, pad_word='<pad>'):
-    words = list(filter(lambda x: x!=pad_word, [{
-        '(': '**LP**',
-        ')': '**RP**'
-    }.get(vocab.idx2word[int(word)], vocab.idx2word[int(word)]) for word in captions[pos]]))
+def l2norm(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    return x / x.norm(2, dim=dim, keepdim=True).clamp(min=1e-6)  # type: ignore[no-untyped-call,no-any-return]
+
+
+def generate_tree(captions, tree_indices, pos, vocab, pad_word="<pad>"):
+    words = list(
+        filter(
+            lambda x: x != pad_word,
+            [
+                {"(": "**LP**", ")": "**RP**"}.get(
+                    vocab.idx2word[int(word)], vocab.idx2word[int(word)]
+                )
+                for word in captions[pos]
+            ],
+        )
+    )
     idx = 0
     while len(words) > 1:
         p = tree_indices[idx][pos]
-        words = words[:p] + ['( {:s} {:s} )'.format(words[p], words[p+1])] + words[p+2:]
+        words = (
+            words[:p]
+            + ["( {:s} {:s} )".format(words[p], words[p + 1])]
+            + words[p + 2 :]
+        )
         idx += 1
     return words[0]
 
@@ -138,12 +165,14 @@ def sequence_mask(sequence_length, max_length=None):
 
 def index_one_hot_ellipsis(tensor, dim, index):
     tensor_shape = tensor.size()
-    tensor = tensor.view(prod(tensor_shape[:dim]), tensor_shape[dim], prod(tensor_shape[dim+1:]))
+    tensor = tensor.view(
+        prod(tensor_shape[:dim]), tensor_shape[dim], prod(tensor_shape[dim + 1 :])
+    )
     assert tensor.size(0) == index.size(0)
     index = index.unsqueeze(-1).unsqueeze(-1)
     index = index.expand(tensor.size(0), 1, tensor.size(2))
     tensor = tensor.gather(1, index)
-    return tensor.view(tensor_shape[:dim] + tensor_shape[dim+1:])
+    return tensor.view(tensor_shape[:dim] + tensor_shape[dim + 1 :])
 
 
 def index_mask(indices, max_length):
@@ -177,17 +206,21 @@ def index_range_ellipsis(x, a, b, dim=1, padding_zero=True):
     base = torch.arange(batch_size)
     if torch.cuda.is_available():
         base = base.cuda()
-    batch_indices = add_dim(base, 1, max_seg_length)  # shape: [batch_size, max_seg_length]
+    batch_indices = add_dim(
+        base, 1, max_seg_length
+    )  # shape: [batch_size, max_seg_length]
 
     flattened_x = x.reshape(concat_shape(-1, x.size()[2:]))
     flattened_indices = (indices + batch_indices * seq_length).reshape(-1)
     output = flattened_x[flattened_indices].reshape(
-        concat_shape(batch_size, max_seg_length, x.size()[2:]))
+        concat_shape(batch_size, max_seg_length, x.size()[2:])
+    )
 
     if padding_zero:
         output = output * add_dim_as_except(mask.type_as(output), output, 0, 1)
 
     return output
+
 
 def add_dim_as_except(tensor, target, *excepts):
     assert len(excepts) == tensor.dim()
@@ -213,22 +246,21 @@ def prod(values, default=1):
     return reduce(lambda x, y: x * y, values)
 
 
-def clean_tree(sentence, remove_tag_set={'<start>', '<end>', '<pad>'}):
+def clean_tree(sentence, remove_tag_set={"<start>", "<end>", "<pad>"}):
     for tag in remove_tag_set:
-        sentence = sentence.replace(tag, ' ')
+        sentence = sentence.replace(tag, " ")
     items = sentence.split()
     stack = list()
     for item in items:
-        if item != ')':
+        if item != ")":
             stack.append(item)
         else:
             pos = -1
-            while stack[pos] != '(':
+            while stack[pos] != "(":
                 pos -= 1
             if pos == -2:
                 stack = stack[:-2] + [stack[-1]]
             else:
-                stack = stack[:pos] + [' '.join(['('] + stack[pos+1:] + [')'])]
+                stack = stack[:pos] + [" ".join(["("] + stack[pos + 1 :] + [")"])]
     assert len(stack) == 1
     return stack[0]
-
