@@ -1,11 +1,14 @@
-import numpy as np
+from typing import TYPE_CHECKING, List
+import numpy as np # type: ignore
+from argparse import Namespace
+import logging
 from collections import OrderedDict
 
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.nn.init
-import torchvision.models as models
+import torchvision.models as models # type: ignore
 from torch.autograd import Variable
 from torch.distributions import Categorical
 from torch.nn import functional
@@ -15,13 +18,16 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from utils import make_embeddings, l2norm, cosine_sim, sequence_mask, \
     index_mask, index_one_hot_ellipsis
-import utils
+import utils, data
+
+if TYPE_CHECKING:
+    from evaluation import LogCollector
 
 
 class EncoderImagePrecomp(nn.Module):
     """ image encoder """
-    def __init__(self, img_dim, embed_size, no_imgnorm=False):
-        super(EncoderImagePrecomp, self).__init__()
+    def __init__(self, img_dim: int, embed_size: int, no_imgnorm: bool=False) -> None:
+        super(EncoderImagePrecomp, self).__init__() #type: ignore[no-untyped-call]
         self.embed_size = embed_size
         self.no_imgnorm = no_imgnorm
 
@@ -29,7 +35,7 @@ class EncoderImagePrecomp(nn.Module):
 
         self.init_weights()
 
-    def init_weights(self):
+    def init_weights(self) -> None:
         """ Xavier initialization for the fully connected layer """
         r = np.sqrt(6.) / np.sqrt(self.fc.in_features +
                                   self.fc.out_features)
@@ -244,7 +250,9 @@ class ContrastiveLoss(nn.Module):
 class VGNSL(object):
     """ the main VGNSL model """
 
-    def __init__(self, opt):
+    logger: 'LogCollector'
+
+    def __init__(self, opt: Namespace):
         self.grad_clip = opt.grad_clip
         self.img_enc = EncoderImagePrecomp(
             opt.img_dim, opt.embed_size, opt.no_imgnorm
@@ -281,7 +289,7 @@ class VGNSL(object):
         if len(state_dict) >= 3:
             self.optimizer.load_state_dict(state_dict[2])
 
-    def train_start(self):
+    def train_start(self) -> None:
         """ switch to train mode """
         self.img_enc.train()
         self.txt_enc.train()
@@ -349,7 +357,7 @@ class VGNSL(object):
 
         return reward_matrix, matching_loss
 
-    def train_emb(self, images, captions, lengths, ids=None, epoch=None, *args):
+    def train_emb(self, images: torch.Tensor, captions: torch.Tensor, lengths: List[int], ids: 'data.IdData'=None, epoch=None, *args) -> None:
         """ one training step given images and captions """
         self.Eiters += 1
         self.logger.update('Eit', self.Eiters)

@@ -1,4 +1,6 @@
-import argparse
+from typing import Collection, Any, List, Tuple, TypeVar, NewType, TypedDict
+from argparse import Namespace, ArgumentParser
+import tqdm
 import logging
 import os
 import pickle
@@ -13,7 +15,7 @@ from model import VGNSL
 from evaluation import i2t, t2i, AverageMeter, LogCollector, encode_data
 
 
-def train(opt, train_loader, model, epoch, val_loader, vocab):
+def train(opt: Namespace, train_loader: "torch.utils.data.DataLoader['data.Batch']", model: VGNSL, epoch: int, val_loader: "torch.utils.data.DataLoader['data.Batch']", vocab: Vocabulary) -> None:
     # average meters to record the training statistics
     batch_time = AverageMeter()
     data_time = AverageMeter()
@@ -23,7 +25,7 @@ def train(opt, train_loader, model, epoch, val_loader, vocab):
     model.train_start()
 
     end = time.time()
-    for i, train_data in enumerate(train_loader):
+    for i, train_data in enumerate(tqdm.tqdm(train_loader, desc='Training loop')):
         # Always reset to train mode
         model.train_start()
 
@@ -32,6 +34,7 @@ def train(opt, train_loader, model, epoch, val_loader, vocab):
 
         # make sure train logger is used
         model.logger = train_logger
+
 
         # Update the model
         model.train_emb(*train_data, epoch=epoch)
@@ -56,7 +59,7 @@ def train(opt, train_loader, model, epoch, val_loader, vocab):
             validate(opt, val_loader, model, vocab)
 
 
-def validate(opt, val_loader, model, vocab):
+def validate(opt: Namespace, val_loader: "torch.utils.data.DataLoader['data.Batch']", model: VGNSL, vocab: Vocabulary) -> float:
     # compute the encoding for all the validation images and captions
     img_embs, cap_embs = encode_data(
         model, val_loader, opt.log_step, logger.info, vocab)
@@ -75,14 +78,14 @@ def validate(opt, val_loader, model, vocab):
     return currscore
 
 
-def save_checkpoint(state, is_best, curr_epoch, filename='checkpoint.pth.tar', prefix=''):
-    torch.save(state, prefix + filename)
+def save_checkpoint(state: Any, is_best: bool, curr_epoch: int, filename: str='checkpoint.pth.tar', prefix: str='') -> None:
+    torch.save(state, prefix + filename) # type: ignore[no-untyped-call]
     if is_best:
         shutil.copyfile(prefix + filename, prefix + 'model_best.pth.tar')
     shutil.copyfile (prefix + filename, prefix + str(curr_epoch) + '.pth.tar')
 
 
-def adjust_learning_rate(opt, optimizer, epoch):
+def adjust_learning_rate(opt: Namespace, optimizer: torch.optim.Optimizer, epoch: int) -> None:
     """Sets the learning rate to the initial LR
        decayed by 10 every 30 epochs"""
     lr = opt.learning_rate * (0.1 ** (epoch // opt.lr_update))
@@ -105,10 +108,16 @@ def accuracy(output, target, topk=(1,)):
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
 
+class CheckpointData(TypedDict):
+    epoch: int
+    model: Any
+    best_rsum: float
+    opt: Namespace
+    Eiters: int
 
 if __name__ == '__main__':
     # hyper parameters
-    parser = argparse.ArgumentParser()
+    parser = ArgumentParser()
     parser.add_argument('--data_path', default='../data/mscoco',
                         help='path to datasets')
     parser.add_argument('--margin', default=0.2, type=float,
@@ -186,7 +195,7 @@ if __name__ == '__main__':
     logger.propagate = False
 
     # load predefined vocabulary and pretrained word embeddings if applicable
-    vocab = pickle.load(open(os.path.join(opt.data_path, 'vocab.pkl'), 'rb'))
+    vocab: Vocabulary = pickle.load(open(os.path.join(opt.data_path, 'vocab.pkl'), 'rb'))
     opt.vocab_size = len(vocab)
 
     if opt.init_embeddings:
@@ -202,7 +211,7 @@ if __name__ == '__main__':
     # construct the model
     model = VGNSL(opt)
 
-    best_rsum = 0
+    best_rsum = 0.
     for epoch in range(opt.num_epochs):
         adjust_learning_rate(opt, model.optimizer, epoch)
 
@@ -215,10 +224,10 @@ if __name__ == '__main__':
         # remember best R@ sum and save checkpoint
         is_best = rsum > best_rsum
         best_rsum = max(rsum, best_rsum)
-        save_checkpoint({
+        save_checkpoint(CheckpointData({
             'epoch': epoch + 1,
-            'model': model.state_dict(),
+            'model': model.state_dict(), # type: ignore[no-untyped-call]
             'best_rsum': best_rsum,
             'opt': opt,
             'Eiters': model.Eiters,
-        }, is_best, epoch, prefix=opt.logger_name + '/')
+        }), is_best, epoch, prefix=opt.logger_name + '/')
