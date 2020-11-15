@@ -10,17 +10,21 @@ from io import TextIOWrapper
 import typer
 import tqdm
 import abc
-from typing import Generic, TypeVar, TYPE_CHECKING
+from typing import Generic, TypeVar, TYPE_CHECKING, Tuple, Union
 import zipfile
 
 import lazy_import
 
-if TYPE_CHECKING:  # These two moduels take a long time so do lazy importing.
+if TYPE_CHECKING:  # These two modules take a long time so do lazy importing.
+    import nltk  # type: ignore
     import transformers as ts
     import torch
+    import benepar  # type: ignore
 else:
+    nltk = lazy_import.lazy_module("nltk")
     ts = lazy_import.lazy_module("transformers")
     torch = lazy_import.lazy_module("torch")
+    benepar = lazy_import.lazy_module("benepar")
 
 
 # Add the path of the mlvgnsl code so we can import Vocabulary.
@@ -219,7 +223,7 @@ def vocab_from_subword_files(
     output_pkl_file: Path,
     input_files: List[Path],
     unk_cutoff: float = 0.85,
-    subword_sep="|",
+    subword_sep: str = "|",
 ) -> None:
     """Create a "Vocabulary" object (look at mlgvsnl/src/vocab.py) from given subword
     tokenized files.
@@ -347,14 +351,14 @@ class BertSingleTokenEmbedder:
 
         outputs = self._model(pt_input_ids)
         assert len(outputs) > 2
-        _, _, hidden_states = outputs  # type: ignore
+        _, _, hidden_states = outputs
 
         desired_layer_states = hidden_states[self._layer_num]
 
         assert desired_layer_states.size(1) == 3
         assert desired_layer_states.size(0) == len(batch_bert_toks)
 
-        return desired_layer_states[:, 1]  # Ignore [CLS] and [SEP]
+        return desired_layer_states[:, 1]  # type: ignore # Ignore [CLS] and [SEP]
 
 
 def _read_vocab(vocab_pkl_file: Path) -> Vocabulary:
@@ -370,6 +374,66 @@ def _read_vocab(vocab_pkl_file: Path) -> Vocabulary:
         subword_preview += "..."
     print(f"Read vocab with {len(vocab)} subwords: {subword_preview}")
     return vocab
+
+
+def _nltk_tree_to_paren(tree: Union[str, nltk.Tree]) -> str:
+    """Convert benepar parse output to something like
+
+    ( Man
+
+    """
+
+    if isinstance(tree, str):
+        return tree
+
+    subtree_results = [_nltk_tree_to_paren(subtree) for subtree in tree]
+
+    if len(subtree_results) == 1:
+        return subtree_results[0]
+
+    return "( " + " ".join(subtree_results) + " )"
+
+
+@app.command()
+def parse_sents(
+    test_caps_file: Path,
+    output_ground_truth_file: Path,
+    benepar_model_name: str,
+    batch_size: int = 64,
+) -> None:
+    """Prepare gold ground truth using https://github.com/udnaan/self-attentive-parser.
+
+    The above link is a fork of the original project that has not yet been merged. It has a fix that
+    allows benepar to work with Tensorflow2, which is the default installation. You can install it
+    with
+
+        pip install git+https://github.com/udnaan/self-attentive-parser
+
+    Args:
+            test_caps_file: A text file where each word is separated by space, and one sentence per
+                line.
+            output_ground_truth_file:
+            benepar_model_name: The name of the model to use. Find the right name from here:
+                https://github.com/nikitakit/self-attentive-parser#available-models
+
+                NOTE: You might have to do
+
+                >>> import benpar
+                >>> benepar.download('benepar_en2_large') # Or whatever other model you use
+    """
+    parser = benepar.Parser(benepar_model_name, batch_size=batch_size)
+
+    with test_caps_file.open() as f:
+        sents = [line.strip().split() for line in f]
+
+    sents = [[word for word in sent if word] for sent in sents]  # Remove empty strings
+    print(f"Parsing {len(sents)} sentences...")
+    trees = list(parser.parse_sents(sents))
+    print(f"Converting to the bracket format ...")
+    paren_expr = [_nltk_tree_to_paren(tree) for tree in trees]
+
+    with output_ground_truth_file.open("w") as f:
+        f.writelines(line + "\n" for line in paren_expr)
 
 
 @app.command()
@@ -411,9 +475,11 @@ def extract_word_embs(
             raise Exception(
                 f"Passed zip file contains {len(files_in_zip)} files. Expecting one."
             )
+
         with word_emb_zip_flie.open(files_in_zip[0]) as fb:  # Opens it as binary file
             f: "io.TextIO" = TextIOWrapper(fb)  # type: ignore
 
+            pbar = tqdm.tqdm(total=len(vocab), desc="Words found.")
             for line in f:
                 split = line.split()
                 word = split[0]
@@ -421,9 +487,10 @@ def extract_word_embs(
                 if word == unk_tok or idx is None:
                     continue
                 vec = [float(i) for i in split[1:]]
-                idx2vec[idx] = vec
+                idx2vec[idx] = torch.tensor(vec)
                 del vocab.idx2word[idx]
                 del vocab.word2idx[word]
+                pbar.update()
 
     if len(vocab.idx2word) > 1:
         print(

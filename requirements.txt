@@ -4,3 +4,5 @@ pycocotools==2.0.2
 torchvision==0.7.0
 more_itertools
 typer
+lazy_import
+nltk
