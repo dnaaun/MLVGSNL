@@ -1,20 +1,26 @@
 from typing import List, Any, Counter, Set
 import gc
 from more_itertools import chunked
-import more_itertools
 import pickle as pkl
 from functools import reduce
 from itertools import chain, islice
 from pathlib import Path
 import re
+from io import TextIOWrapper
 import typer
 import tqdm
 import abc
 from typing import Generic, TypeVar, TYPE_CHECKING
+import zipfile
 
-from transformers import BertTokenizer, BertConfig, BertModel
-import torch
-from torch import Tensor
+import lazy_import
+
+if TYPE_CHECKING:  # These two moduels take a long time so do lazy importing.
+    import transformers as ts
+    import torch
+else:
+    ts = lazy_import.lazy_module("transformers")
+    torch = lazy_import.lazy_module("torch")
 
 
 # Add the path of the mlvgnsl code so we can import Vocabulary.
@@ -91,12 +97,11 @@ def convert_to_subword(
 
         subword_sep: The subword separator used in the output file.
     """
-    from transformers.tokenization_bert import BertTokenizer
 
     found_subwords = set()
     num_subword_per_word = RunningAverage("num_subwords_per_word")
 
-    tokenizer = BertTokenizer.from_pretrained(transformers_mdl)
+    tokenizer = ts.BertTokenizer.from_pretrained(transformers_mdl)
     with output_file.open("w") as out_f, txt_file.open() as in_f:
         pbar = tqdm.tqdm(enumerate(in_f))
         for line_num, line in pbar:
@@ -189,6 +194,7 @@ def vocab_from_word_files(
         most_common_iter = iter(pair[0] for pair in counter.most_common())
         while len(selected_words) < desired_num:
             selected_words.add(next(most_common_iter))
+        print(f"Some selected words: ", list(islice(selected_words, 0, 5)))
         subwords_per_inp_file[inp_file] = selected_words
 
     lens = {
@@ -285,12 +291,12 @@ class BertSingleTokenEmbedder:
     """Because Transofrmers library is not used to accepting pre-Bert-tokenized input."""
 
     def __init__(self, bert_mdl: str, layer_num: int) -> None:
-        self._tokenizer = BertTokenizer.from_pretrained(bert_mdl)
-        config = BertConfig.from_pretrained(
+        self._tokenizer = ts.BertTokenizer.from_pretrained(bert_mdl)
+        config = ts.BertConfig.from_pretrained(
             bert_mdl, output_hidden_states=True, max_seq_length=3
         )
 
-        self._model = BertModel.from_pretrained(bert_mdl, config=config)
+        self._model = ts.BertModel.from_pretrained(bert_mdl, config=config)
         self._cls_token_id = self._tokenizer.convert_tokens_to_ids(
             self._tokenizer.cls_token
         )
@@ -310,7 +316,7 @@ class BertSingleTokenEmbedder:
 
         print("Using model: ", self._model.config)
 
-    def __call__(self, batch_bert_toks: List[str], debug: bool = False) -> Tensor:
+    def __call__(self, batch_bert_toks: List[str], debug: bool = False) -> torch.Tensor:
         """
 
         Args:
@@ -351,15 +357,108 @@ class BertSingleTokenEmbedder:
         return desired_layer_states[:, 1]  # Ignore [CLS] and [SEP]
 
 
+def _read_vocab(vocab_pkl_file: Path) -> Vocabulary:
+    with vocab_pkl_file.open("rb") as fb:
+        vocab = pkl.load(fb)
+
+    if not isinstance(vocab, Vocabulary):
+        raise Exception("The vocab_pkl_file was not a Vocabulary object.")
+
+    all_subwords = [vocab.idx2word[i] for i in range(len(vocab))]
+    subword_preview = ",".join(['"' + s + '"' for s in all_subwords[:5]])
+    if len(vocab) > 5:
+        subword_preview += "..."
+    print(f"Read vocab with {len(vocab)} subwords: {subword_preview}")
+    return vocab
+
+
 @app.command()
-def extract_mbert_embs(
+def extract_word_embs(
+    vocab_pkl_file: Path,
+    output_torch_file: Path,
+    word_emb_zip: Path,
+    unk_tok: str = "<unk>",
+) -> None:
+    """
+
+    Extract the embedding for each word in the vocab from the given word_emb_zip file and write it
+    in a torch tensor format to output_torch_file.
+
+    Args:
+        vocab_pkl_file:
+        output_torch_file:
+        word_emb_zip: The zip file containing word embeddings. Note that this has to contain a
+        single file, where each line is the word, followed by the vector.  Like this:
+
+            <word> 0.12 11.2 423.3 .....
+
+        unk_tok:
+    """
+    vocab = _read_vocab(vocab_pkl_file)
+    num_words = len(vocab)  # Read this before we modify the vocab below
+
+    if unk_tok not in vocab.word2idx:
+        raise Exception(
+            f"Unk tok '{unk_tok} not in vocab file! Please pass a different unk tok"
+            " command line parameter. Or a different vocab file."
+        )
+
+    idx2vec = {}
+
+    with zipfile.ZipFile(word_emb_zip) as word_emb_zip_flie:
+        files_in_zip = word_emb_zip_flie.infolist()
+        if len(files_in_zip) != 1:
+            raise Exception(
+                f"Passed zip file contains {len(files_in_zip)} files. Expecting one."
+            )
+        with word_emb_zip_flie.open(files_in_zip[0]) as fb:  # Opens it as binary file
+            f: "io.TextIO" = TextIOWrapper(fb)  # type: ignore
+
+            for line in f:
+                split = line.split()
+                word = split[0]
+                idx = vocab.word2idx.get(word)
+                if word == unk_tok or idx is None:
+                    continue
+                vec = [float(i) for i in split[1:]]
+                idx2vec[idx] = vec
+                del vocab.idx2word[idx]
+                del vocab.word2idx[word]
+
+    if len(vocab.idx2word) > 1:
+        print(
+            f"WARNING: Did not find vectors for {len(vocab.idx2word) - 1} words. Will set their vectors"
+            " to the vector for the unk tok (which will be the average of all the vectors."
+        )
+
+    # Includes the unk_tok
+    remaining_ids = list(vocab.idx2word)
+
+    dim = len(next(iter(idx2vec.values())))  # Dimension of vectors
+    embs = torch.zeros((num_words, dim), dtype=torch.float32)
+    average_emb = torch.zeros((1, dim), dtype=torch.float32)
+
+    for idx, vec in idx2vec.items():
+        embs[idx] = vec
+        average_emb += vec
+
+    average_emb /= len(idx2vec)
+
+    for idx in vocab.idx2word:
+        embs[idx] = average_emb
+
+    with output_torch_file.open("wb") as fb:
+        torch.save(embs, fb)
+
+
+@app.command()
+def extract_subword_embs(
     vocab_pkl_file: Path,
     output_torch_file: Path,
     layer_num: int = 7,
     unk_tok: str = "<unk>",
     batch_size: int = 1000,
     transformers_mdl: str = "bert-base-multilingual-uncased",
-    cuda: bool = True,
 ) -> None:
     """
 
@@ -378,17 +477,7 @@ def extract_mbert_embs(
         batch_size: The batch size used to group things.
     """
 
-    with vocab_pkl_file.open("rb") as fb:
-        vocab = pkl.load(fb)
-
-    if not isinstance(vocab, Vocabulary):
-        raise Exception("The vocab_pkl_file was not a Vocabulary object.")
-
-    all_subwords = [vocab.idx2word[i] for i in range(len(vocab))]
-    subword_preview = ",".join(['"' + s + '"' for s in all_subwords[:5]])
-    if len(vocab) > 5:
-        subword_preview += "..."
-    print(f"Read vocab with {len(vocab)} subwords: {subword_preview}")
+    vocab = _read_vocab(vocab_pkl_file)
 
     try:
         unk_tok_i = all_subwords.index(unk_tok)
