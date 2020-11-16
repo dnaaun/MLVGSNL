@@ -60,7 +60,6 @@ class PrecompDataset(Base):
         # image
         img_id = index // self.caps_per_img
         image = torch.tensor(self.images[img_id])
-        breakpoint()
         # caption
         caption = [
             self.vocab(token)
