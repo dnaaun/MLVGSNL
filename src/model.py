@@ -362,7 +362,6 @@ class VGNSL(object):
         with torch.set_grad_enabled(not volatile):
             img_emb = self.img_enc(images)
             txt_outputs = self.txt_enc(captions, lengths, volatile)
-        reveal_type((img_emb,))
         return (img_emb,) + txt_outputs
 
     def forward_reward(

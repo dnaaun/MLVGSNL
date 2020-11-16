@@ -72,7 +72,7 @@ class LogCollector:
 
 def encode_data(
     model: VGNSL,
-    data_loader: DataLoader[PrecompDatasetExample, PrecompDataLoaderBatch],
+    data_loader: 'DataLoader[PrecompDatasetExample, PrecompDataLoaderBatch]',
     log_step: int = 10,
     logging: Callable[[Any], None] = print,
     vocab: Optional[Vocabulary] = None,

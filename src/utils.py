@@ -4,6 +4,7 @@ from functools import reduce
 
 import torch
 from torch import Tensor
+import numpy as np
 import torch.nn as nn
 from typing import Sequence, Tuple, Union, List, TYPE_CHECKING
 
@@ -13,7 +14,7 @@ if TYPE_CHECKING:
 else:
     ModuleBase = nn.Module
 
-class EmbeddingCombiner(nn.Module[Tensor]):
+class EmbeddingCombiner(ModuleBase):
     def __init__(self, *embeddings: ModuleBase):
         super().__init__()
         self.embeddings = nn.ModuleList(embeddings)
@@ -60,7 +61,7 @@ def tree2str(tree):
 def make_embeddings(opt: Namespace, vocab_size: int, dim: int) -> EmbeddingCombiner:
     init_embeddings = None
     if hasattr(opt, "vocab_init_embeddings"):
-        init_embeddings = torch.tensor(torch.load(opt.vocab_init_embeddings))
+        init_embeddings = torch.from_numpy(np.load(opt.vocab_init_embeddings))
 
     emb = None
     if opt.init_embeddings_type in ("override", "partial"):

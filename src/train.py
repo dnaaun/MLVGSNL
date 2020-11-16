@@ -18,10 +18,10 @@ from torch.utils.data import DataLoader
 
 def train(
     opt: Namespace,
-    train_loader: DataLoader[data.PrecompDatasetExample, data.PrecompDataLoaderBatch],
+    train_loader: 'DataLoader[data.PrecompDatasetExample, data.PrecompDataLoaderBatch]',
     model: VGNSL,
     epoch: int,
-    val_loader: DataLoader[data.PrecompDatasetExample, data.PrecompDataLoaderBatch],
+    val_loader: 'DataLoader[data.PrecompDatasetExample, data.PrecompDataLoaderBatch]',
     vocab: Vocabulary,
 ) -> None:
     # average meters to record the training statistics
@@ -73,7 +73,7 @@ def train(
 
 def validate(
     opt: Namespace,
-    val_loader: DataLoader[data.PrecompDatasetExample, data.PrecompDataLoaderBatch],
+    val_loader: 'DataLoader[data.PrecompDatasetExample, data.PrecompDataLoaderBatch]',
     model: VGNSL,
     vocab: Vocabulary,
 ) -> float:
