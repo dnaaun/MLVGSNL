@@ -63,7 +63,7 @@ SPECIAL_TOKENS = [
 @app.command()
 def convert_to_subword(
     txt_file: Path,
-    output_file: Path = Path("./subword-vocab.txt"),
+    output_file: Path,
     transformers_mdl: str = "bert-base-multilingual-uncased",
     subword_sep: str = "|",
 ) -> None:
@@ -258,16 +258,17 @@ def make_vocab(
         pkl.dump(vocab, fb)
 
 
-class BertSingleTokenEmbedder:
+class TransformersSingleTokenEmbedder:
     """Because Transofrmers library is not used to accepting pre-Bert-tokenized input."""
 
-    def __init__(self, bert_mdl: str, layer_num: int) -> None:
-        self._tokenizer = ts.BertTokenizer.from_pretrained(bert_mdl)
+    def __init__(self, transformers_mdl: str, layer_num: int) -> None:
+        self._transformers_mdl = transformers_mdl
+        self._tokenizer = ts.BertTokenizer.from_pretrained(transformers_mdl)
         config = ts.BertConfig.from_pretrained(
-            bert_mdl, output_hidden_states=True, max_seq_length=3
+            transformers_mdl, output_hidden_states=True, max_seq_length=3
         )
 
-        self._model = ts.BertModel.from_pretrained(bert_mdl, config=config)
+        self._model = ts.BertModel.from_pretrained(transformers_mdl, config=config)
         self._cls_token_id = self._tokenizer.convert_tokens_to_ids(
             self._tokenizer.cls_token
         )
@@ -309,14 +310,16 @@ class BertSingleTokenEmbedder:
 
         subword_batch]
         """
-        input_ids = [
-            [
+        input_ids = []
+
+        for subword in batch_bert_toks:
+            sent_input_ids = [
                 self._cls_token_id,
                 self._tokenizer.convert_tokens_to_ids(subword),
                 self._sep_token_id,
             ]
-            for subword in batch_bert_toks
-        ]
+            input_ids.append(sent_input_ids)
+
 
         pt_input_ids = torch.tensor(
             input_ids, device="cuda" if self._use_cuda else None
@@ -326,7 +329,8 @@ class BertSingleTokenEmbedder:
             print("Input ids: ", input_ids[:5])
             print("Pytorch model input size:", pt_input_ids.size())
 
-        outputs = self._model(pt_input_ids)
+        with torch.no_grad():
+            outputs = self._model(pt_input_ids)
         assert len(outputs) > 2
         _, _, hidden_states = outputs
 
@@ -435,9 +439,7 @@ def parse_sents(
 
 @app.command()
 def extract_word_embs(
-    vocab_pkl_file: Path,
-    output_npy_file: Path,
-    all_embs_file: Path,
+    vocab_pkl_file: Path, output_npy_file: Path, all_embs_file: Path,
 ) -> None:
     """
 
@@ -559,28 +561,27 @@ def extract_subword_embs(
     vocab = _read_vocab(vocab_pkl_file)
 
     # Exclude unk_tok and pad_tok
-    non_special_toks = iter(vocab.idx2word[idx] for idx in range(2, len(vocab)))
+    non_special_toks = iter(
+        vocab.idx2word[idx] for idx in range(len(SPECIAL_TOKENS), len(vocab))
+    )
 
     embeddings = []
 
-    embedder = BertSingleTokenEmbedder(transformers_mdl, layer_num)
+    embedder = TransformersSingleTokenEmbedder(transformers_mdl, layer_num)
 
     for i, subword_batch in tqdm.tqdm(enumerate(chunked(non_special_toks, batch_size))):
         embs = embedder(subword_batch, debug=i < 5)
         embeddings.append(embs)
-        gc.collect()
-        if i > 150:
-            break
 
     non_special_tok_embs = torch.cat(embeddings)
     final_embs = torch.zeros((len(vocab), embedder.dim), device=embedder.device)
 
     # Set the embedding of the special toks to the average of all embeddings
-    # This matters only for the unk token.
-    final_embs[: len(SPECIAL_TOKENS)] = non_special_tok_embs.mean(dim=1, keepdim=True)
+    final_embs[: len(SPECIAL_TOKENS)] = non_special_tok_embs.mean(dim=0, keepdim=True)
+    final_embs[len(SPECIAL_TOKENS) :] = non_special_tok_embs
 
     with output_npy_file.open("wb") as fb:
-        np.save(fb, final_embs.numpy())
+        np.save(fb, final_embs.cpu().numpy())
 
 
 if __name__ == "__main__":

@@ -5,5 +5,6 @@ torchvision==0.7.0
 more_itertools
 typer
 lazy_import
-git+https://github.com/udnaan/self-attentive-parser
+git+https://github.com/udnaan/self-attentive-parser#egg=benepar
 typing_extensions
+transformers
