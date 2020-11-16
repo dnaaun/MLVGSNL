@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-from typing import List, Any, Counter, Set, TextIO, Optional
 import gc
 from more_itertools import chunked
 import pickle as pkl
@@ -10,8 +9,19 @@ import re
 from io import TextIOWrapper
 import typer
 import tqdm
-import abc
-from typing import Generic, TypeVar, TYPE_CHECKING, Tuple, Union
+from typing import (
+    Generic,
+    TypeVar,
+    TYPE_CHECKING,
+    Tuple,
+    Union,
+    List,
+    Any,
+    Counter,
+    Set,
+    TextIO,
+    Optional,
+)
 import zipfile, gzip
 
 import lazy_import
@@ -42,38 +52,12 @@ else:
 
 app = typer.Typer()
 
-_T = TypeVar("_T")
-
-
-class RunningMetric(abc.ABC, Generic[_T]):
-
-    _value: _T
-
-    def __init__(self, name: str) -> None:
-        self._name = name
-        self._steps = 0
-
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}({self._name}): {self._value}"
-
-    def update(self, val: _T) -> None:
-        self._steps += 1
-        self._update(val)
-
-    @abc.abstractmethod
-    def _update(self, val: _T) -> None:
-        pass
-
-
-class RunningAverage(RunningMetric[float]):
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._total_sum = 0.0
-        self._value = 0
-
-    def _update(self, val: float) -> None:
-        self._total_sum += val
-        self._value = self._total_sum / self._steps
+SPECIAL_TOKENS = [
+    "<pad>",  # MUST BE FIRST, the codebase assumes vocab  id 0 is padding.
+    "<unk>",
+    "<start>",
+    "<end>",
+]
 
 
 @app.command()
@@ -106,29 +90,27 @@ def convert_to_subword(
         subword_sep: The subword separator used in the output file.
     """
 
-    found_subwords = set()
-    num_subword_per_word = RunningAverage("num_subwords_per_word")
+    if len(subword_sep) != 1:
+        raise Exception(f"Subword sep must be of length 1, not '{subword_sep}'")
 
-    tokenizer = ts.BertTokenizer.from_pretrained(transformers_mdl)
+    found_subwords = set()
+
+    tokenizer = ts.AutoTokenizer.from_pretrained(transformers_mdl)
     with output_file.open("w") as out_f, txt_file.open() as in_f:
         pbar = tqdm.tqdm(enumerate(in_f))
         for line_num, line in pbar:
 
-            # Update us with the average subword number sometimes
-            if line_num % 1000 == 0:
-                pbar.set_description(repr(num_subword_per_word))
             words = line.strip().split(" ")
             all_subwords = [tokenizer.tokenize(word) for word in words]
 
             to_write = ""
             for subwords in all_subwords:
                 found_subwords.update(subwords)
-                num_subword_per_word.update(len(subwords))
                 if subword_sep in subwords:
                     raise Exception(
                         f"Subword separator '{subword_sep}' was found in the dataset at line {line_num}"
                     )
-                to_write += "|".join(subwords) + " "
+                to_write += subword_sep.join(subwords) + " "
 
             if not to_write:
                 raise Exception(f"Found empty line in dataset at line {line_num}")
@@ -201,8 +183,6 @@ def make_vocab(
         "in each word, this subword_sep value (for example, the '|' char) was used to separate "
         "subwords.",
     ),
-    pad_tok: str="<pad>",
-    unk_tok: str="<unk>"
 ) -> None:
     """Create a "Vocabulary" object (look at mlgvsnl/src/vocab.py) from given word
     tokenized files.
@@ -227,7 +207,7 @@ def make_vocab(
     else:
         split_pattern = re.escape(subword_sep) + "|" + r"\s+"
 
-    final_vocab_from_each_file = {}
+    final_words_from_each_file = {}
 
     train_files, dev_files = train_dev_pairs[0::2], train_dev_pairs[1::2]
     for train_file, dev_file in zip(train_files, dev_files):
@@ -241,10 +221,12 @@ def make_vocab(
                 f"Read total {len(words_in_train)} words({len(train_counter)} unique words) from {str(train_file)}."
             )
 
-        for bad in [" ", "", "\n"]:
+        # If, in the input files,  there are consecutive spaces, or spaces at end of
+        # line, or other misc edge cases, take care of them.
+        for bad in [" ", "", "\n"] + SPECIAL_TOKENS:
             if bad in train_counter:
                 print(
-                    f"Warning: '{bad}' found. Maybe train file is malformed. Removing it and proceeding."
+                    f"Warning: '{bad}' found as a word. Maybe train file is malformed. Removing it and proceeding."
                 )
                 train_counter.pop(bad)
 
@@ -253,11 +235,11 @@ def make_vocab(
             dev_counter = Counter(words_in_dev)
 
         final_vocab = _acheive_oov_ratio(train_counter, dev_counter, oov_ratio)
-        final_vocab_from_each_file[train_file] = final_vocab
+        final_words_from_each_file[train_file] = final_vocab
 
     lens = {
         str(train_file): len(vocab)
-        for train_file, vocab in final_vocab_from_each_file.items()
+        for train_file, vocab in final_words_from_each_file.items()
     }
     print(
         f"Will output a final pickle with following num of subwords from each file: {lens}"
@@ -265,86 +247,12 @@ def make_vocab(
 
     vocab = Vocabulary()
 
-    # THe <pad> token HAS to be number zero, that's the way they wrote the code.
-    vocab.add_word(pad_tok)
-
-    # The unk token can be anything really.
-    vocab.add_word(unk_tok)
-    for word in chain(*map(lambda x: sorted(x), final_vocab_from_each_file.values())):
+    for word in SPECIAL_TOKENS:
         vocab.add_word(word)
 
-    with output_pkl_file.open("wb") as fb:
-        pkl.dump(vocab, fb)
-
-
-@app.command()
-def vocab_from_subword_files(
-    output_pkl_file: Path,
-    input_files: List[Path],
-    unk_cutoff: float = 0.85,
-    subword_sep: str = "|",
-) -> None:
-    """Create a "Vocabulary" object (look at mlgvsnl/src/vocab.py) from given subword
-    tokenized files.
-
-    Args:
-        output_pkl_file: The pkl file to write the output to.
-        input_files: A list of files, each of htem has to look like this:
-
-            a restaurant has modern wooden tables and chair|##s .
-            a long restaurant table with ratt|##an rounded back chair|##s .
-            a long table with a plant on top of it surrounded with wooden chair|##s
-            a long table with a flower arrangement in the middle for meetings
-
-        subword_sep: The subword separator used inthe input files (above, it's the '|'
-            char).
-        unk_cutoff: What percentage of the unique subwords to keep in the final
-        vocabulary.  Note that, for _each_ input file the specified percentage of unique
-        subwords is retained. This is to avoid one big input file dominating all the
-        rest in the final output.
-    """
-
-    subwords_per_inp_file = {}
-    split_pattern = re.escape(subword_sep) + "|" + r"\s+"
-
-    if len(set(input_files)) != len(input_files):
-        raise Exception(f"Duplicates found in given input files: {input_files}")
-
-    for inp_file in tqdm.tqdm(input_files, desc="files processed."):
-        counter = Counter[str]()
-        with inp_file.open() as f:
-            subwords = re.split(split_pattern, f.read().lower())
-            print(f"Read {len(subwords)} unique subwords from {str(inp_file)}.")
-            counter.update(subwords)
-
-        for bad in [" ", "", "\n"]:
-            if bad in counter:
-                print(
-                    f"Warning: '{bad}' found. Maybe input file is malformed."
-                    " Removing it and proceeding."
-                )
-
-                counter.pop(bad)
-
-        selected_subwords: Set[str] = set()
-        desired_num = unk_cutoff * len(counter)
-        most_common_subwords = iter(pair[0] for pair in counter.most_common())
-        while len(selected_subwords) < desired_num:
-            selected_subwords.add(next(most_common_subwords))
-        subwords_per_inp_file[inp_file] = selected_subwords
-
-    lens = {
-        str(inp_file): len(subwords)
-        for inp_file, subwords in subwords_per_inp_file.items()
-    }
-    print(
-        f"Will output a final pickle with following num of subwords from each file: {lens}"
-    )
-
-    vocab = Vocabulary()
-    vocab.add_word("<unk>")
-    for subword in chain(*subwords_per_inp_file.values()):
-        vocab.add_word(subword)
+    for _, words_from_file in sorted(final_words_from_each_file.items()):
+        for word in sorted(words_from_file):
+            vocab.add_word(word)
 
     with output_pkl_file.open("wb") as fb:
         pkl.dump(vocab, fb)
@@ -378,6 +286,16 @@ class BertSingleTokenEmbedder:
             self._model.cuda()
 
         print("Using model: ", self._model.config)
+
+    @property
+    def device(self) -> torch.device:
+        """Return whether it's on GPU or CPU"""
+        return next(self._model.parameters()).device  # type: ignore
+
+    @property
+    def dim(self) -> int:
+        """Return the dimensions of the embeddings."""
+        return self._model.config.hidden_size  # type: ignore
 
     def __call__(self, batch_bert_toks: List[str], debug: bool = False) -> torch.Tensor:
         """
@@ -420,9 +338,29 @@ class BertSingleTokenEmbedder:
         return desired_layer_states[:, 1]  # type: ignore # Ignore [CLS] and [SEP]
 
 
+def _validate_vocab(vocab: Vocabulary) -> None:
+    assert len(vocab.word2idx) == len(vocab.idx2word)
+    for word, idx in vocab.word2idx.items():
+        assert vocab.idx2word[idx] == word
+
+    for tok in SPECIAL_TOKENS:
+        if tok not in vocab.word2idx:
+            raise Exception(f"Token ,'{tok}' not in vocab file!")
+    if vocab.word2idx[SPECIAL_TOKENS[0]] != 0:
+        raise Exception("The padding token MUST be at index 0. It's currently not.")
+
+    first_words = [vocab.idx2word[i] for i in range(len(SPECIAL_TOKENS))]
+    if sorted(first_words) != sorted(SPECIAL_TOKENS):
+        raise Exception(
+            f"The special tokens ({SPECIAL_TOKENS}) are not found at the beginning of "
+            "the vocab(ie, their indices don't number 0 through {len(SPECIAL_TOKENS) -1}."
+        )
+
+
 def _read_vocab(vocab_pkl_file: Path) -> Vocabulary:
     with vocab_pkl_file.open("rb") as fb:
         vocab = pkl.load(fb)
+    _validate_vocab(vocab)
 
     if not isinstance(vocab, Vocabulary):
         raise Exception("The vocab_pkl_file was not a Vocabulary object.")
@@ -500,7 +438,6 @@ def extract_word_embs(
     vocab_pkl_file: Path,
     output_npy_file: Path,
     all_embs_file: Path,
-    unk_tok: str = "<unk>",
 ) -> None:
     """
 
@@ -520,12 +457,6 @@ def extract_word_embs(
     """
     vocab = _read_vocab(vocab_pkl_file)
     num_words = len(vocab)  # Read this before we modify the vocab below
-
-    if unk_tok not in vocab.word2idx:
-        raise Exception(
-            f"Unk tok '{unk_tok} not in vocab file! Please pass a different unk tok"
-            " command line parameter. Or a different vocab file."
-        )
 
     idx2vec = {}
 
@@ -550,11 +481,14 @@ def extract_word_embs(
     words_found_pbar: "tqdm.tqdm[None]" = tqdm.tqdm(
         total=len(vocab), desc="Words found.", position=0
     )
+
+    # Make into set for faster lookup
+    special_toks_set = set(SPECIAL_TOKENS)
     for line in tqdm.tqdm(text_file, desc="Words checked in embeddings file."):
         split = line.split()
         word = split[0]
         idx = vocab.word2idx.get(word)
-        if word == unk_tok or idx is None:
+        if word in special_toks_set or idx is None:
             continue
         vec = [float(i) for i in split[1:]]
         idx2vec[idx] = torch.tensor(vec)
@@ -588,7 +522,7 @@ def extract_word_embs(
 
     average_emb /= len(idx2vec)
 
-    # Initalize vectors for  words that were not found in the vocabulary with the 
+    # Initalize vectors for  words that were not found in the vocabulary with the
     # same vector as UNK.
     for idx in vocab.idx2word:
         embs[idx] = average_emb
@@ -602,7 +536,6 @@ def extract_subword_embs(
     vocab_pkl_file: Path,
     output_npy_file: Path,
     layer_num: int = 7,
-    unk_tok: str = "<unk>",
     batch_size: int = 1000,
     transformers_mdl: str = "bert-base-multilingual-uncased",
 ) -> None:
@@ -625,32 +558,29 @@ def extract_subword_embs(
 
     vocab = _read_vocab(vocab_pkl_file)
 
-    try:
-        unk_tok_i = all_subwords.index(unk_tok)
-        if unk_tok_i != 0:
-            raise Exception("The code doesn't support unk_tok not being index 0.")
-    except ValueError:
-        raise Exception("UNK token not found!")
-
-    all_subwords_except_unk = islice(all_subwords, 1, len(all_subwords))
+    # Exclude unk_tok and pad_tok
+    non_special_toks = iter(vocab.idx2word[idx] for idx in range(2, len(vocab)))
 
     embeddings = []
 
     embedder = BertSingleTokenEmbedder(transformers_mdl, layer_num)
 
-    for i, subword_batch in tqdm.tqdm(
-        enumerate(chunked(all_subwords_except_unk, batch_size))
-    ):
+    for i, subword_batch in tqdm.tqdm(enumerate(chunked(non_special_toks, batch_size))):
         embs = embedder(subword_batch, debug=i < 5)
         embeddings.append(embs)
         gc.collect()
         if i > 150:
             break
 
-    all_embs = torch.cat(embeddings)
+    non_special_tok_embs = torch.cat(embeddings)
+    final_embs = torch.zeros((len(vocab), embedder.dim), device=embedder.device)
+
+    # Set the embedding of the special toks to the average of all embeddings
+    # This matters only for the unk token.
+    final_embs[: len(SPECIAL_TOKENS)] = non_special_tok_embs.mean(dim=1, keepdim=True)
 
     with output_npy_file.open("wb") as fb:
-        np.save(fb, embs.numpy())
+        np.save(fb, final_embs.numpy())
 
 
 if __name__ == "__main__":
