@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 from typing import List, Any, Counter, Set
 import gc
 from more_itertools import chunked
@@ -17,11 +18,13 @@ import lazy_import
 
 if TYPE_CHECKING:  # These two modules take a long time so do lazy importing.
     import nltk  # type: ignore
+    import numpy as np
     import transformers as ts
     import torch
     import benepar  # type: ignore
 else:
     nltk = lazy_import.lazy_module("nltk")
+    np = lazy_import.lazy_module("numpy")
     ts = lazy_import.lazy_module("transformers")
     torch = lazy_import.lazy_module("torch")
     benepar = lazy_import.lazy_module("benepar")
@@ -30,10 +33,10 @@ else:
 # Add the path of the mlvgnsl code so we can import Vocabulary.
 import sys
 
-src_path = str(Path(__file__).resolve().parent.parent)
+src_path = str(Path(__file__).resolve().parent.parent / "src")
 sys.path.append(src_path)
 
-from src.vocab import Vocabulary
+from vocab import Vocabulary
 
 
 app = typer.Typer()
@@ -180,8 +183,11 @@ def vocab_from_word_files(
     for inp_file in tqdm.tqdm(input_files, desc="files processed."):
         counter = Counter[str]()
         with inp_file.open() as f:
-            words = set(re.split(split_pattern, f.read().lower()))
-            print(f"Read {len(words)} words from {str(inp_file)}.")
+            words = re.split(split_pattern, f.read().lower())
+            unique_words = sorted(set(words))
+            print(
+                f"Read total {len(words)} words({len(unique_words)} unique words) from {str(inp_file)}."
+            )
             counter.update(words)
 
         for bad in [" ", "", "\n"]:
@@ -193,12 +199,14 @@ def vocab_from_word_files(
 
                 counter.pop(bad)
 
-        selected_words: Set[str] = set()
+        selected_words = []
         desired_num = unk_cutoff * len(counter)
-        most_common_iter = iter(pair[0] for pair in counter.most_common())
+
+        # Sort to ensure reproducability
+        most_common_iter = iter(sorted(pair[0] for pair in counter.most_common()))
         while len(selected_words) < desired_num:
-            selected_words.add(next(most_common_iter))
-        print(f"Some selected words: ", list(islice(selected_words, 0, 5)))
+            selected_words.append(next(most_common_iter))
+        print(f"Some selected words: ",selected_words[:5])
         subwords_per_inp_file[inp_file] = selected_words
 
     lens = {
@@ -211,7 +219,7 @@ def vocab_from_word_files(
 
     vocab = Vocabulary()
     vocab.add_word("<unk>")
-    for subword in chain(*subwords_per_inp_file.values()):
+    for subword in chain(*map(sorted, subwords_per_inp_file.values())): # Sort to ensure reproducability
         vocab.add_word(subword)
 
     with output_pkl_file.open("wb") as fb:
@@ -439,18 +447,18 @@ def parse_sents(
 @app.command()
 def extract_word_embs(
     vocab_pkl_file: Path,
-    output_torch_file: Path,
+    output_npy_file: Path,
     word_emb_zip: Path,
     unk_tok: str = "<unk>",
 ) -> None:
     """
 
     Extract the embedding for each word in the vocab from the given word_emb_zip file and write it
-    in a torch tensor format to output_torch_file.
+    in a torch tensor format to output_npy_file.
 
     Args:
         vocab_pkl_file:
-        output_torch_file:
+        output_npy_file:
         word_emb_zip: The zip file containing word embeddings. Note that this has to contain a
         single file, where each line is the word, followed by the vector.  Like this:
 
@@ -479,8 +487,10 @@ def extract_word_embs(
         with word_emb_zip_flie.open(files_in_zip[0]) as fb:  # Opens it as binary file
             f: "io.TextIO" = TextIOWrapper(fb)  # type: ignore
 
-            pbar = tqdm.tqdm(total=len(vocab), desc="Words found.")
-            for line in f:
+            words_found_pbar = tqdm.tqdm(
+                total=len(vocab), desc="Words found.", position=0
+            )
+            for line in tqdm.tqdm(f, desc="Words checked in zip file."):
                 split = line.split()
                 word = split[0]
                 idx = vocab.word2idx.get(word)
@@ -490,7 +500,10 @@ def extract_word_embs(
                 idx2vec[idx] = torch.tensor(vec)
                 del vocab.idx2word[idx]
                 del vocab.word2idx[word]
-                pbar.update()
+                words_found_pbar.update()
+
+                if len(vocab.word2idx) == 1: # Only unk tok left
+                    break
 
     if len(vocab.idx2word) > 1:
         print(
@@ -514,14 +527,14 @@ def extract_word_embs(
     for idx in vocab.idx2word:
         embs[idx] = average_emb
 
-    with output_torch_file.open("wb") as fb:
-        torch.save(embs, fb)
+    with output_npy_file.open("wb") as fb:
+        torch.save(fb, embs.numpy())
 
 
 @app.command()
 def extract_subword_embs(
     vocab_pkl_file: Path,
-    output_torch_file: Path,
+    output_npy_file: Path,
     layer_num: int = 7,
     unk_tok: str = "<unk>",
     batch_size: int = 1000,
@@ -530,7 +543,7 @@ def extract_subword_embs(
     """
 
     Given a pickle file containing a Vocabulary object, extract from mBERT
-    the embeddings for the word and write it in a .pth file (ie, call torch.save() on
+    the embeddings for the word and write it in a .npy file (ie, call numpy.save() on
     the embedding matrix).
 
     The subwords are fed to bert in this way: [CLS] subword [SEP]
@@ -570,8 +583,8 @@ def extract_subword_embs(
 
     all_embs = torch.cat(embeddings)
 
-    with output_torch_file.open("wb") as fb:
-        torch.save(all_embs, fb)
+    with output_npy_file.open("wb") as fb:
+        np.save(fb, embs.numpy())
 
 
 if __name__ == "__main__":
