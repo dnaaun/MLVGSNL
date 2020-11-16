@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-from typing import List, Any, Counter, Set
+from typing import List, Any, Counter, Set, TextIO, Optional
 import gc
 from more_itertools import chunked
 import pickle as pkl
@@ -22,6 +22,8 @@ if TYPE_CHECKING:  # These two modules take a long time so do lazy importing.
     import transformers as ts
     import torch
     import benepar  # type: ignore
+
+    from src.vocab import Vocabulary
 else:
     nltk = lazy_import.lazy_module("nltk")
     np = lazy_import.lazy_module("numpy")
@@ -29,14 +31,13 @@ else:
     torch = lazy_import.lazy_module("torch")
     benepar = lazy_import.lazy_module("benepar")
 
+    # Add the path of the mlvgnsl code so we can import Vocabulary.
+    import sys
 
-# Add the path of the mlvgnsl code so we can import Vocabulary.
-import sys
+    src_path = str(Path(__file__).resolve().parent.parent / "src")
+    sys.path.append(src_path)
 
-src_path = str(Path(__file__).resolve().parent.parent / "src")
-sys.path.append(src_path)
-
-from vocab import Vocabulary
+    from vocab import Vocabulary
 
 
 app = typer.Typer()
@@ -140,71 +141,121 @@ def convert_to_subword(
     print(f"Found {len(found_subwords)} subwords.")
 
 
+def _oov_ratio(words_in_vocab: Set[str], text: List[str]) -> float:
+    not_found = 0
+    for word in text:
+        if word not in words_in_vocab:
+            not_found += 1
+    return not_found / len(text)
+
+
+def _acheive_oov_ratio(
+    train_counter: Counter[str], dev_counter: Counter[str], desired_oov_ratio: float
+) -> Set[str]:
+    """Select a subset of the vocab words to achieve a desired OOV ratio in some text.
+
+    That text is represented by text_counter.
+    """
+    new_vocab = set()
+    in_vocab_count = 0
+    cur_oov_ratio = 1.0
+    dev_total = sum(dev_counter.values())
+    dev_in_vocab_count = 0
+    for word, train_count in train_counter.most_common():
+        if train_count < 2:  # We want to have at least some OOV words
+            break
+
+        new_vocab.add(word)
+
+        if word in dev_counter:
+            dev_in_vocab_count += dev_counter[word]
+            new_oov_ratio = (dev_total - dev_in_vocab_count) / dev_total
+            if abs(desired_oov_ratio - new_oov_ratio) < abs(
+                desired_oov_ratio - cur_oov_ratio
+            ):
+                cur_oov_ratio = new_oov_ratio
+            else:
+                break
+    print(
+        f"Was asked for OOV ratio: {desired_oov_ratio}. Could achieve OOV ratio of {cur_oov_ratio}."
+    )
+    return new_vocab
+
+
 @app.command()
-def vocab_from_word_files(
+def make_vocab(
     output_pkl_file: Path,
-    input_files: List[Path],
-    unk_cutoff: float = 0.85,
+    train_dev_pairs: List[Path] = typer.Argument(
+        None,
+        help="Pairs of training and dev files."
+        " The train file will be where word counts are calculated."
+        " The dev file is used to determine the number of words to include to approximate the "
+        " desired ratio of uknown words in an unseen test set.",
+    ),
+    oov_ratio: float = typer.Option(
+        0.15, help="The desired ratio of OOV count to total count in the dev set."
+    ),
+    subword_sep: Optional[str] = typer.Option(
+        None,
+        help="If this option is set, we'll asssume the input files are subword tokenized, where, "
+        "in each word, this subword_sep value (for example, the '|' char) was used to separate "
+        "subwords.",
+    ),
 ) -> None:
     """Create a "Vocabulary" object (look at mlgvsnl/src/vocab.py) from given word
     tokenized files.
 
-    Args:
-        output_pkl_file: The pkl file to write the output to.
-        input_files: A list of files, each of htem has to look like this:
+    An example run looks like:
 
-            A restaurant has modern wooden tables and chairs .
-            A long restaurant table with rattan rounded back chairs .
-            a long table with a plant on top of it surrounded with wooden chairs
-            A long table with a flower arrangement in the middle for meetings
+        $ python data_prep.py vocab-from-word-files vocab.pkl train_caps.txt dev_caps.txt --unk-ratio=0.8
 
-        subword_sep: The subword separator used inthe input files (above, it's the '|' char).
-        unk_cutoff: What percentage of the unique subwords to keep in the final
-            vocabulary.  Note that, for _each_ input file the specified percentage of unique
-            subwords is retained. This is to avoid one big input file dominating all the
-            rest in the final output.
+    One can also include multiple PAIRS of train and dev files:
 
-    REMEBMER: Never include the development set, or the test set, when making the vocabulary file.
+        $ python data_prep.py vocab-from-word-files vocab.pkl zh/train_caps.txt zh/dev_caps.txt en/train_caps.txt en/dev_caps.txt --unk-ratio=0.8
     """
 
-    subwords_per_inp_file = {}
-    split_pattern = r"\s|\n"  # Split by space or new line char
+    if len(train_dev_pairs) % 2 != 0:
+        raise Exception(
+            f"Pairs of training and dev sets expected, but {len(train_dev_pairs)} is not an even "
+            "number"
+        )
 
-    if len(set(input_files)) != len(input_files):
-        raise Exception(f"Duplicates found in given input files: {input_files}")
+    if subword_sep is None:
+        split_pattern = r"\s|\n"  # Split by space or new line char
+    else:
+        split_pattern = re.escape(subword_sep) + "|" + r"\s+"
 
-    for inp_file in tqdm.tqdm(input_files, desc="files processed."):
-        counter = Counter[str]()
-        with inp_file.open() as f:
-            words = re.split(split_pattern, f.read().lower())
-            unique_words = sorted(set(words))
+    final_vocab_from_each_file = {}
+
+    train_files, dev_files = train_dev_pairs[0::2], train_dev_pairs[1::2]
+    for train_file, dev_file in zip(train_files, dev_files):
+        print(
+            f"Inspecting traing file: {str(train_file)} and dev file {str(dev_file)}..."
+        )
+        with train_file.open() as f:
+            words_in_train = re.split(split_pattern, f.read().lower())
+            train_counter = Counter(words_in_train)
             print(
-                f"Read total {len(words)} words({len(unique_words)} unique words) from {str(inp_file)}."
+                f"Read total {len(words_in_train)} words({len(train_counter)} unique words) from {str(train_file)}."
             )
-            counter.update(words)
 
         for bad in [" ", "", "\n"]:
-            if bad in counter:
+            if bad in train_counter:
                 print(
-                    f"Warning: '{bad}' found. Maybe input file is malformed."
-                    " Removing it and proceeding."
+                    f"Warning: '{bad}' found. Maybe train file is malformed. Removing it and proceeding."
                 )
+                train_counter.pop(bad)
 
-                counter.pop(bad)
+        with dev_file.open() as f:
+            words_in_dev = re.split(split_pattern, f.read().lower())
+            dev_counter = Counter(words_in_dev)
 
-        selected_words = []
-        desired_num = unk_cutoff * len(counter)
-
-        # Sort to ensure reproducability
-        most_common_iter = iter(sorted(pair[0] for pair in counter.most_common()))
-        while len(selected_words) < desired_num:
-            selected_words.append(next(most_common_iter))
-        print(f"Some selected words: ",selected_words[:5])
-        subwords_per_inp_file[inp_file] = selected_words
+        final_vocab = _acheive_oov_ratio(train_counter, dev_counter, oov_ratio)
+        final_vocab_from_each_file[train_file] = final_vocab
 
     lens = {
-        str(inp_file): len(subwords)
-        for inp_file, subwords in subwords_per_inp_file.items()
+        str(train_file): len(vocab)
+        for train_file, vocab in final_vocab_from_each_file.items()
     }
     print(
         f"Will output a final pickle with following num of subwords from each file: {lens}"
@@ -212,8 +263,8 @@ def vocab_from_word_files(
 
     vocab = Vocabulary()
     vocab.add_word("<unk>")
-    for subword in chain(*map(sorted, subwords_per_inp_file.values())): # Sort to ensure reproducability
-        vocab.add_word(subword)
+    for word in chain(*map(lambda x: sorted(x), final_vocab_from_each_file.values())):
+        vocab.add_word(word)
 
     with output_pkl_file.open("wb") as fb:
         pkl.dump(vocab, fb)
@@ -476,21 +527,20 @@ def extract_word_embs(
     # The gz file must be a compressed text file.
     if all_embs_file.suffix == ".zip":
         compressed_file = zipfile.ZipFile(all_embs_file)
-        compressed_file.close()
-        files_in_zip = all_embs_file.infolist()
+        files_in_zip = compressed_file.infolist()
         if len(files_in_zip) != 1:
             raise Exception(
                 f"Passed zip file contains {len(files_in_zip)} files. Expecting one."
             )
 
-        binary_file = all_embs_file.open(files_in_zip[0])
-        text_file: "io.TextIO" = TextIOWrapper(fb)  # type: ignore
+        binary_file = compressed_file.open(files_in_zip[0])
+        text_file: TextIO = TextIOWrapper(fb)  # type: ignore
     elif all_embs_file.suffix == ".gz":
         if all_embs_file.stem.endswith(".tar"):
             raise Exception("We don't support .tar.gz currently, just .gz")
-        text_file = gzip.open(all_embs_file, "rt")
+        text_file = gzip.open(all_embs_file, "rt")  # type: ignore[assignment]
 
-    words_found_pbar = tqdm.tqdm(
+    words_found_pbar: "tqdm.tqdm[None]" = tqdm.tqdm(
         total=len(vocab), desc="Words found.", position=0
     )
     for line in tqdm.tqdm(text_file, desc="Words checked in embeddings file."):
@@ -505,13 +555,12 @@ def extract_word_embs(
         del vocab.word2idx[word]
         words_found_pbar.update()
 
-        if len(vocab.word2idx) == 1: # Only unk tok left
+        if len(vocab.word2idx) == 1:  # Only unk tok left
             break
 
     text_file.close()
     if all_embs_file.suffix == ".zip":
         compressed_file.close()
-
 
     if len(vocab.idx2word) > 1:
         print(
