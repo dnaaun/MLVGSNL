@@ -285,6 +285,10 @@ if __name__ == "__main__":
     model = VGNSL(opt)
 
     best_rsum = 0.0
+
+    # Do one test validation run to make sure all is fine
+    validate(opt, val_loader, model, vocab)
+
     for epoch in range(opt.num_epochs):
         adjust_learning_rate(opt, model.optimizer, epoch)
 

@@ -39,6 +39,9 @@ class PrecompDataset(Base):
             for line in f:
                 self.captions.append(line.strip().lower().split())
             f.close()
+        print(f"Read {len(self.captions)} captions from {data_split}_caps.txt. For example: ")
+        for cap in self.captions[:5]:
+            print(f"\t{cap}")
         self.length = len(self.captions)
 
         # image features
@@ -57,6 +60,7 @@ class PrecompDataset(Base):
         # image
         img_id = index // self.caps_per_img
         image = torch.tensor(self.images[img_id])
+        breakpoint()
         # caption
         caption = [
             self.vocab(token)
