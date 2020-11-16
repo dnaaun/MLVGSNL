@@ -201,6 +201,8 @@ def make_vocab(
         "in each word, this subword_sep value (for example, the '|' char) was used to separate "
         "subwords.",
     ),
+    pad_tok: str="<pad>",
+    unk_tok: str="<unk>"
 ) -> None:
     """Create a "Vocabulary" object (look at mlgvsnl/src/vocab.py) from given word
     tokenized files.
@@ -262,7 +264,12 @@ def make_vocab(
     )
 
     vocab = Vocabulary()
-    vocab.add_word("<unk>")
+
+    # THe <pad> token HAS to be number zero, that's the way they wrote the code.
+    vocab.add_word(pad_tok)
+
+    # The unk token can be anything really.
+    vocab.add_word(unk_tok)
     for word in chain(*map(lambda x: sorted(x), final_vocab_from_each_file.values())):
         vocab.add_word(word)
 
@@ -581,6 +588,8 @@ def extract_word_embs(
 
     average_emb /= len(idx2vec)
 
+    # Initalize vectors for  words that were not found in the vocabulary with the 
+    # same vector as UNK.
     for idx in vocab.idx2word:
         embs[idx] = average_emb
 
