@@ -12,7 +12,7 @@ import typer
 import tqdm
 import abc
 from typing import Generic, TypeVar, TYPE_CHECKING, Tuple, Union
-import zipfile
+import zipfile, gzip
 
 import lazy_import
 
@@ -145,7 +145,6 @@ def vocab_from_word_files(
     output_pkl_file: Path,
     input_files: List[Path],
     unk_cutoff: float = 0.85,
-    char_level: bool = False,
 ) -> None:
     """Create a "Vocabulary" object (look at mlgvsnl/src/vocab.py) from given word
     tokenized files.
@@ -164,18 +163,12 @@ def vocab_from_word_files(
             vocabulary.  Note that, for _each_ input file the specified percentage of unique
             subwords is retained. This is to avoid one big input file dominating all the
             rest in the final output.
-        do_char_level: This specifies if the text file is character based (as opposed to word based).
-            For example, Flickr30K Chinese has no space characters, each character is a "word"
-            by itself.
 
     REMEBMER: Never include the development set, or the test set, when making the vocabulary file.
     """
 
     subwords_per_inp_file = {}
-    if char_level:
-        split_pattern = "|\n"  # Split by "empty space" or a new line char
-    else:
-        split_pattern = r"\s|\n"  # Split by space or new line char
+    split_pattern = r"\s|\n"  # Split by space or new line char
 
     if len(set(input_files)) != len(input_files):
         raise Exception(f"Duplicates found in given input files: {input_files}")
@@ -448,19 +441,20 @@ def parse_sents(
 def extract_word_embs(
     vocab_pkl_file: Path,
     output_npy_file: Path,
-    word_emb_zip: Path,
+    all_embs_file: Path,
     unk_tok: str = "<unk>",
 ) -> None:
     """
 
-    Extract the embedding for each word in the vocab from the given word_emb_zip file and write it
+    Extract the embedding for each word in the vocab from the given all_embs_file file and write it
     in a torch tensor format to output_npy_file.
 
     Args:
         vocab_pkl_file:
         output_npy_file:
-        word_emb_zip: The zip file containing word embeddings. Note that this has to contain a
-        single file, where each line is the word, followed by the vector.  Like this:
+        all_embs_file: The zip or gz  file containing word embeddings. Note that this
+        has to contain a single file, where each line is the word, followed by the
+        vector.  Like this:
 
             <word> 0.12 11.2 423.3 .....
 
@@ -477,33 +471,47 @@ def extract_word_embs(
 
     idx2vec = {}
 
-    with zipfile.ZipFile(word_emb_zip) as word_emb_zip_flie:
-        files_in_zip = word_emb_zip_flie.infolist()
+    # Support both zip and gz. A zip file can possibly contain multiple files, but
+    # we accept zip files containing only one file.
+    # The gz file must be a compressed text file.
+    if all_embs_file.suffix == ".zip":
+        compressed_file = zipfile.ZipFile(all_embs_file)
+        compressed_file.close()
+        files_in_zip = all_embs_file.infolist()
         if len(files_in_zip) != 1:
             raise Exception(
                 f"Passed zip file contains {len(files_in_zip)} files. Expecting one."
             )
 
-        with word_emb_zip_flie.open(files_in_zip[0]) as fb:  # Opens it as binary file
-            f: "io.TextIO" = TextIOWrapper(fb)  # type: ignore
+        binary_file = all_embs_file.open(files_in_zip[0])
+        text_file: "io.TextIO" = TextIOWrapper(fb)  # type: ignore
+    elif all_embs_file.suffix == ".gz":
+        if all_embs_file.stem.endswith(".tar"):
+            raise Exception("We don't support .tar.gz currently, just .gz")
+        text_file = gzip.open(all_embs_file, "rt")
 
-            words_found_pbar = tqdm.tqdm(
-                total=len(vocab), desc="Words found.", position=0
-            )
-            for line in tqdm.tqdm(f, desc="Words checked in zip file."):
-                split = line.split()
-                word = split[0]
-                idx = vocab.word2idx.get(word)
-                if word == unk_tok or idx is None:
-                    continue
-                vec = [float(i) for i in split[1:]]
-                idx2vec[idx] = torch.tensor(vec)
-                del vocab.idx2word[idx]
-                del vocab.word2idx[word]
-                words_found_pbar.update()
+    words_found_pbar = tqdm.tqdm(
+        total=len(vocab), desc="Words found.", position=0
+    )
+    for line in tqdm.tqdm(text_file, desc="Words checked in embeddings file."):
+        split = line.split()
+        word = split[0]
+        idx = vocab.word2idx.get(word)
+        if word == unk_tok or idx is None:
+            continue
+        vec = [float(i) for i in split[1:]]
+        idx2vec[idx] = torch.tensor(vec)
+        del vocab.idx2word[idx]
+        del vocab.word2idx[word]
+        words_found_pbar.update()
 
-                if len(vocab.word2idx) == 1: # Only unk tok left
-                    break
+        if len(vocab.word2idx) == 1: # Only unk tok left
+            break
+
+    text_file.close()
+    if all_embs_file.suffix == ".zip":
+        compressed_file.close()
+
 
     if len(vocab.idx2word) > 1:
         print(
@@ -528,7 +536,7 @@ def extract_word_embs(
         embs[idx] = average_emb
 
     with output_npy_file.open("wb") as fb:
-        torch.save(fb, embs.numpy())
+        np.save(fb, embs.numpy())
 
 
 @app.command()
