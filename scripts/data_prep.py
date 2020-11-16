@@ -534,7 +534,7 @@ def extract_word_embs(
             )
 
         binary_file = compressed_file.open(files_in_zip[0])
-        text_file: TextIO = TextIOWrapper(fb)  # type: ignore
+        text_file: TextIO = TextIOWrapper(binary_file)  # type: ignore[arg-type]
     elif all_embs_file.suffix == ".gz":
         if all_embs_file.stem.endswith(".tar"):
             raise Exception("We don't support .tar.gz currently, just .gz")
