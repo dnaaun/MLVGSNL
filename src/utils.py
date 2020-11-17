@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 else:
     ModuleBase = nn.Module
 
+
 class EmbeddingCombiner(ModuleBase):
     def __init__(self, *embeddings: ModuleBase):
         super().__init__()
@@ -21,6 +22,63 @@ class EmbeddingCombiner(ModuleBase):
 
     def forward(self, input: Tensor) -> Tensor:
         return torch.cat([e(input) for e in self.embeddings], dim=-1)
+
+
+class SubwordEmbedder(ModuleBase):
+    """Pools over subwords. Look at forward() for docs.
+
+    THIS MODULE DEPENDS ON THE PADDING EMBEDDING BEING ALL ZEROS. IT WILL SET THIS IN __init__.
+    PLEASE BE CAREFUL NOT TO DO SOMETHING LIKE:
+
+        >>> subword_embedder._subword_embs.weight.data.copy_(fasttext_embs)
+
+    Instead, pass `fasttext_embs` as a param to __init__
+
+    """
+
+    def __init__(
+        self, vocab_size: int, dim: int, padding_idx=0, init_embs: Tensor = None
+    ) -> None:
+        super().__init__()
+        self._padding_idx = padding_idx
+        self._subword_embs = nn.Embedding(vocab_size, dim, padding_idx=padding_idx)
+        if init_embs is not None:
+            self._subword_embs.weight.data.copy_(init_embs)
+
+        # Initialize zero vector here so that it gets moved to GPU automatically if necessary
+        self._zero = torch.tensor(0.0, requires_grad=False)
+
+        # Zero out the padding idx
+        self._subword_embs.weight[padding_idx] = self._zero
+
+    def forward(self, token_ids: Tensor) -> Tensor:
+        """
+        Args:
+            token_ids: tensor of shape (B, L, N)
+                where B is batch size
+                      L is sequence length
+                      N is maximum number of subwords per word
+
+                If a word has less than N subwords, the remaining ids must be padding_idx.
+        Returns:
+            a tensor of shape (B, L, dim)
+                where dim is self._subword_embs.dim
+        """
+        # (B, L, N, dim)
+        not_pooled = self._subword_embs(token_ids)
+        # (B, L)
+        num_subwords = (token_ids != self._padding_idx).sum(dim=-1)
+
+        # (B, L, dim)
+        summed = not_pooled.sum(dim=-2)
+        # (B, L, dim)
+        pooled = torch.where(
+            (num_subwords == self._zero).unsqueeze(-1),  # condition
+            self._zero,  # if true
+            summed / num_subwords.unsqueeze(-1),  # if false
+        )
+
+        return pooled
 
 
 def tree2list(tokens):
@@ -58,7 +116,7 @@ def tree2str(tree):
     return "( " + " ".join(items) + " )"
 
 
-def make_embeddings(opt: Namespace, vocab_size: int, dim: int) -> 'nn.Module[Tensor]':
+def make_embeddings(opt: Namespace, vocab_size: int, dim: int) -> "nn.Module[Tensor]":
     init_embeddings = None
     if hasattr(opt, "vocab_init_embeddings"):
         init_embeddings = torch.from_numpy(np.load(opt.vocab_init_embeddings))
@@ -82,6 +140,8 @@ def make_embeddings(opt: Namespace, vocab_size: int, dim: int) -> 'nn.Module[Ten
         emb1.weight.requires_grad_(False)
 
         emb = EmbeddingCombiner(emb1, emb2)
+    elif opt.init_embeddings_type == "bert":
+        emb = SubwordEmbedder(vocab_size, dim, init_embeddings)
     else:
         raise NotImplementedError()
 
