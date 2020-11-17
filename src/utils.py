@@ -58,7 +58,7 @@ def tree2str(tree):
     return "( " + " ".join(items) + " )"
 
 
-def make_embeddings(opt: Namespace, vocab_size: int, dim: int) -> EmbeddingCombiner:
+def make_embeddings(opt: Namespace, vocab_size: int, dim: int) -> 'nn.Module[Tensor]':
     init_embeddings = None
     if hasattr(opt, "vocab_init_embeddings"):
         init_embeddings = torch.from_numpy(np.load(opt.vocab_init_embeddings))

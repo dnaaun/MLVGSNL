@@ -152,8 +152,8 @@ def encode_data(
 
 @overload
 def i2t(
-    images: torch.Tensor,
-    captions: torch.Tensor,
+    images: np.ndarray,
+    captions: np.ndarray,
     *,
     return_ranks: Literal[False] = False,
     npts: int = None,
@@ -164,8 +164,8 @@ def i2t(
 
 @overload
 def i2t(
-    images: torch.Tensor,
-    captions: torch.Tensor,
+    images: np.ndarray,
+    captions: np.ndarray,
     *,
     return_ranks: Literal[True],
     npts: int = None,
@@ -175,8 +175,8 @@ def i2t(
 
 
 def i2t(
-    images: torch.Tensor,
-    captions: torch.Tensor,
+    images: np.ndarray,
+    captions: np.ndarray,
     npts: int = None,
     measure: Literal["cosine"] = "cosine",
     return_ranks: bool = False,
@@ -229,8 +229,8 @@ def i2t(
 
 @overload
 def t2i(
-    images: torch.Tensor,
-    captions: torch.Tensor,
+    images: np.ndarray,
+    captions: np.ndarray,
     *,
     return_ranks: Literal[False] = False,
     npts: int = None,
@@ -241,8 +241,8 @@ def t2i(
 
 @overload
 def t2i(
-    images: torch.Tensor,
-    captions: torch.Tensor,
+    images: np.ndarray,
+    captions: np.ndarray,
     *,
     return_ranks: Literal[True],
     npts: int = None,
@@ -252,8 +252,8 @@ def t2i(
 
 
 def t2i(
-    images: torch.Tensor,
-    captions: torch.Tensor,
+    images: np.ndarray,
+    captions: np.ndarray,
     *,
     return_ranks: bool=False,
     npts: int = None,

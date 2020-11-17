@@ -1,6 +1,6 @@
 from typing import Any, TYPE_CHECKING, Tuple, List, NewType, List
 import nltk  # type: ignore
-import numpy as np  # type: ignore
+import numpy as np 
 import os
 
 import torch
@@ -46,7 +46,7 @@ class PrecompDataset(Base):
 
         # image features
         if load_img:
-            self.images: np.ndarray = np.load(
+            self.images: 'np.ndarray[np.float64]' = np.load(
                 os.path.join(data_path, f"{data_split}_ims.npy")
             )
         else:

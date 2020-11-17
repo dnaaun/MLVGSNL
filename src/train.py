@@ -18,10 +18,10 @@ from torch.utils.data import DataLoader
 
 def train(
     opt: Namespace,
-    train_loader: 'DataLoader[data.PrecompDatasetExample, data.PrecompDataLoaderBatch]',
+    train_loader: "DataLoader[data.PrecompDatasetExample, data.PrecompDataLoaderBatch]",
     model: VGNSL,
     epoch: int,
-    val_loader: 'DataLoader[data.PrecompDatasetExample, data.PrecompDataLoaderBatch]',
+    val_loader: "DataLoader[data.PrecompDatasetExample, data.PrecompDataLoaderBatch]",
     vocab: Vocabulary,
 ) -> None:
     # average meters to record the training statistics
@@ -73,7 +73,7 @@ def train(
 
 def validate(
     opt: Namespace,
-    val_loader: 'DataLoader[data.PrecompDatasetExample, data.PrecompDataLoaderBatch]',
+    val_loader: "DataLoader[data.PrecompDatasetExample, data.PrecompDataLoaderBatch]",
     model: VGNSL,
     vocab: Vocabulary,
 ) -> float:
@@ -114,13 +114,13 @@ def adjust_learning_rate(
     opt: Namespace, optimizer: torch.optim.Optimizer, epoch: int
 ) -> None:
     """Sets the learning rate to the initial LR
-       decayed by 10 every 30 epochs"""
+    decayed by 10 every 30 epochs"""
     lr = opt.learning_rate * (0.1 ** (epoch // opt.lr_update))
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
 
 
-def accuracy(output, target, topk=(1,)):
+def accuracy(output: torch.Tensor, target: torch.Tensor, topk: Tuple[int, ...] = (1,)) -> List[float]:
     """Computes the precision@k for the specified values of k"""
     maxk = max(topk)
     batch_size = target.size(0)
@@ -217,11 +217,14 @@ if __name__ == "__main__":
     parser.add_argument("--init_embeddings", type=int, default=0)
     parser.add_argument(
         "--init_embeddings_type",
-        choices=["override", "partial", "partial-fixed"],
+        choices=["override", "partial", "partial-fixed", "subword"],
         default="override",
     )
     parser.add_argument(
-        "--init_embeddings_key", choices=["glove", "fasttext"], default="override"
+        "--init_embeddings_key", choices=["glove", "fasttext", "bert"], default="override",
+        help="If set, we will use one of 'vocab.pkl.glove_embeddings.npy', "
+        "'vocab.pkl.fasttext_embeddings.npy', 'vocab.pkl.bert_embeddings.npy' to initalize "
+        " embeddings."
     )
     parser.add_argument("--init_embeddings_partial_dim", type=int, default=0)
 
