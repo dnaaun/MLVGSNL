@@ -28,18 +28,21 @@ import lazy_import
 
 if TYPE_CHECKING:  # These two modules take a long time so do lazy importing.
     import nltk  # type: ignore
-    import numpy as np
     import transformers as ts
     import torch
     import benepar  # type: ignore
+    import numpy as np
 
     from src.vocab import Vocabulary
 else:
     nltk = lazy_import.lazy_module("nltk")
-    np = lazy_import.lazy_module("numpy")
     ts = lazy_import.lazy_module("transformers")
     torch = lazy_import.lazy_module("torch")
-    benepar = lazy_import.lazy_module("benepar")
+
+    # Benepar doesn't play nice wiht lazy importing
+    import benepar  # type: ignore
+
+    np = lazy_import.lazy_module("numpy")
 
     # Add the path of the mlvgnsl code so we can import Vocabulary.
     import sys
@@ -123,12 +126,12 @@ def convert_to_subword(
     print(f"Found {len(found_subwords)} subwords.")
 
 
-def _oov_ratio(words_in_vocab: Set[str], text: List[str]) -> float:
+def _oov_ratio(words_in_vocab: Set[str], counter: Counter[str]) -> float:
     not_found = 0
-    for word in text:
+    for word, count in counter.items():
         if word not in words_in_vocab:
-            not_found += 1
-    return not_found / len(text)
+            not_found += count
+    return not_found / sum(counter.values())
 
 
 def _acheive_oov_ratio(
@@ -165,6 +168,43 @@ def _acheive_oov_ratio(
 
 
 @app.command()
+def get_subword_stats(subword_file: Path, subword_sep: str = "|") -> None:
+    """Print stats about min, average and max number of subwords per word."""
+
+    num_subwords_per_word = Counter[int]()
+    # The key of the above counter is the number of subwords in a word.
+    # The value is how many words are like that(ie, have that number of subwords).
+    with subword_file.open() as f:
+        for line in f:
+            words = line.strip().split()
+            num_subwords_per_word.update(
+                [word.count(subword_sep) + 1 for word in words]
+            )
+
+    total_num_words = sum(num_subwords_per_word.values())
+    min_ = min(num_subwords_per_word)
+    max_ = max(num_subwords_per_word)
+    avg = (
+        sum(
+            num_words * num_subwords_per_word
+            for num_subwords_per_word, num_words in num_subwords_per_word.items()
+        )
+        / total_num_words
+    )
+    extreme_counts = num_subwords_per_word.most_common()[:4]
+    extreme_counts += num_subwords_per_word.most_common()[-4:]
+    print(f"Total num of words: {total_num_words}")
+    print(f"Num of subwords per word: avg={avg}, min={min_}, max={max_}.")
+    print(
+        f"A few extreme counts: ",
+        ", ".join(
+            f"{num_words} words with {subwords_per_word}"
+            for  subwords_per_word, num_words in extreme_counts
+        ),
+    )
+
+
+@app.command()
 def make_vocab(
     output_pkl_file: Path,
     train_dev_pairs: List[Path] = typer.Argument(
@@ -175,7 +215,11 @@ def make_vocab(
         " desired ratio of uknown words in an unseen test set.",
     ),
     oov_ratio: float = typer.Option(
-        0.15, help="The desired ratio of OOV count to total count in the dev set."
+        0.15,
+        help="The desired ratio of OOV count to total count in the dev set."
+        " This is taken into account only when --subword-sep is not set. If --subword-sep"
+        " is set, tokens with the least count(for eg, 1) in the train set will be"
+        "dropped, wihtout regard for oov ratio.",
     ),
     subword_sep: Optional[str] = typer.Option(
         None,
@@ -234,7 +278,15 @@ def make_vocab(
             words_in_dev = re.split(split_pattern, f.read().lower())
             dev_counter = Counter(words_in_dev)
 
-        final_vocab = _acheive_oov_ratio(train_counter, dev_counter, oov_ratio)
+        if subword_sep is None:
+            final_vocab = _acheive_oov_ratio(train_counter, dev_counter, oov_ratio)
+        else:
+            min_count = train_counter.most_common()[-1][1]
+            final_vocab = {
+                word for word, count in train_counter.items() if count > min_count
+            }
+            final_oov_ratio = _oov_ratio(final_vocab, dev_counter)
+            print(f"Dropped all words with a count less than {min_count} in train set.")
         final_words_from_each_file[train_file] = final_vocab
 
     lens = {
@@ -320,7 +372,6 @@ class TransformersSingleTokenEmbedder:
             ]
             input_ids.append(sent_input_ids)
 
-
         pt_input_ids = torch.tensor(
             input_ids, device="cuda" if self._use_cuda else None
         )
@@ -380,7 +431,6 @@ def _read_vocab(vocab_pkl_file: Path) -> Vocabulary:
 def _nltk_tree_to_paren(tree: Union[str, nltk.Tree]) -> str:
     """Convert benepar parse output to something like
 
-    ( Man
 
     """
 
@@ -408,7 +458,7 @@ def parse_sents(
     allows benepar to work with Tensorflow2, which is the default installation. You can install it
     with
 
-        pip install git+https://github.com/udnaan/self-attentive-parser
+        pip install git+https://github.com/udnaan/self-attentive-parser 
 
     Args:
             test_caps_file: A text file where each word is separated by space, and one sentence per
@@ -417,11 +467,8 @@ def parse_sents(
             benepar_model_name: The name of the model to use. Find the right name from here:
                 https://github.com/nikitakit/self-attentive-parser#available-models
 
-                NOTE: You might have to do
-
-                >>> import benpar
-                >>> benepar.download('benepar_en2_large') # Or whatever other model you use
-    """
+                    """
+    benepar.download(benepar_model_name) # DOesn't do anything if already downloaded
     parser = benepar.Parser(benepar_model_name, batch_size=batch_size)
 
     with test_caps_file.open() as f:
