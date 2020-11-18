@@ -215,7 +215,7 @@ def make_vocab(
         " desired ratio of uknown words in an unseen test set.",
     ),
     oov_ratio: float = typer.Option(
-        0.15,
+        0.005,
         help="The desired ratio of OOV count to total count in the dev set."
         " This is taken into account only when --subword-sep is not set. If --subword-sep"
         " is set, tokens with the least count(for eg, 1) in the train set will be"
@@ -230,14 +230,6 @@ def make_vocab(
 ) -> None:
     """Create a "Vocabulary" object (look at mlgvsnl/src/vocab.py) from given word
     tokenized files.
-
-    An example run looks like:
-
-        $ python data_prep.py vocab-from-word-files vocab.pkl train_caps.txt dev_caps.txt --unk-ratio=0.8
-
-    One can also include multiple PAIRS of train and dev files:
-
-        $ python data_prep.py vocab-from-word-files vocab.pkl zh/train_caps.txt zh/dev_caps.txt en/train_caps.txt en/dev_caps.txt --unk-ratio=0.8
     """
 
     if len(train_dev_pairs) % 2 != 0:
