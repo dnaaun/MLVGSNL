@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from collections import OrderedDict
 
 from model import VGNSL
-from data import get_eval_loader, PrecompDataLoaderBatch, PrecompDatasetExample
+from data import get_eval_loader, PrecompDataLoaderBatch, _Example
 from vocab import Vocabulary
 from utils import generate_tree, clean_tree
 
@@ -37,8 +37,7 @@ class AverageMeter:
         self.avg = self.sum / (0.0001 + self.count)
 
     def __str__(self) -> str:
-        """String representation for logging
-        """
+        """String representation for logging"""
         # for values that should be recorded exactly e.g. iteration number
         if self.count == 0:
             return str(self.val)
@@ -60,8 +59,7 @@ class LogCollector:
         self.meters[k].update(v, n)
 
     def __str__(self) -> str:
-        """Concatenate the meters in one log line
-        """
+        """Concatenate the meters in one log line"""
         s = ""
         for i, (k, v) in enumerate(self.meters.items()):
             if i > 0:
@@ -72,14 +70,13 @@ class LogCollector:
 
 def encode_data(
     model: VGNSL,
-    data_loader: 'DataLoader[PrecompDatasetExample, PrecompDataLoaderBatch]',
+    data_loader: "DataLoader[_Example, PrecompDataLoaderBatch]",
     log_step: int = 10,
     logging: Callable[[Any], None] = print,
     vocab: Optional[Vocabulary] = None,
     stage: Literal["dev", "test", "train"] = "dev",
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Encode all images and captions loadable by `data_loader`
-    """
+    """Encode all images and captions loadable by `data_loader`"""
     batch_time = AverageMeter()
     val_logger = LogCollector()
     # switch to evaluate mode
@@ -126,8 +123,8 @@ def encode_data(
 
         # initialize the numpy arrays given the size of the embeddings
         if img_embs is None:
-            img_embs = np.zeros((len(data_loader.dataset), img_emb.size(1)))
-            cap_embs = np.zeros((len(data_loader.dataset), cap_emb.size(1)))
+            img_embs = np.zeros((len(data_loader.dataset), img_emb.size(1)))  # type: ignore
+            cap_embs = np.zeros((len(data_loader.dataset), cap_emb.size(1)))  # type: ignore
 
         # preserve the embeddings by copying from gpu and converting to numpy
         img_embs[ids] = img_emb.data.cpu().numpy().copy()
@@ -147,6 +144,7 @@ def encode_data(
             )
         del images, captions
 
+    assert img_embs is not None and cap_embs is not None
     return img_embs, cap_embs
 
 
@@ -170,7 +168,7 @@ def i2t(
     return_ranks: Literal[True],
     npts: int = None,
     measure: Literal["cosine"] = "cosine",
-) -> Tuple[Tuple[float, float, float, float, float], Tuple[float, float]]:
+) -> Tuple[Tuple[float, float, float, float, float], Tuple[np.ndarray, np.ndarray]]:
     ...
 
 
@@ -181,7 +179,7 @@ def i2t(
     measure: Literal["cosine"] = "cosine",
     return_ranks: bool = False,
 ) -> Union[
-    Tuple[Tuple[float, float, float, float, float], Tuple[float, float]],
+    Tuple[Tuple[float, float, float, float, float], Tuple[np.ndarray, np.ndarray]],
     Tuple[float, float, float, float, float],
 ]:
     """
@@ -209,7 +207,7 @@ def i2t(
         # Score
         rank = 1e20
         for i in range(5 * index, 5 * index + 5, 1):
-            tmp = np.where(inds == i)[0][0]
+            tmp: int = np.where(inds == i)[0][0]  # type: ignore
             if tmp < rank:
                 rank = tmp
         ranks[index] = rank
@@ -219,7 +217,7 @@ def i2t(
     r1 = 100.0 * len(np.where(ranks < 1)[0]) / len(ranks)
     r5 = 100.0 * len(np.where(ranks < 5)[0]) / len(ranks)
     r10 = 100.0 * len(np.where(ranks < 10)[0]) / len(ranks)
-    medr: float = np.floor(np.median(ranks)) + 1
+    medr: float = np.floor(np.median(ranks)) + 1  # type: ignore
     meanr: float = ranks.mean() + 1
     if return_ranks:
         return (r1, r5, r10, medr, meanr), (ranks, top1)
@@ -247,7 +245,7 @@ def t2i(
     return_ranks: Literal[True],
     npts: int = None,
     measure: Literal["cosine"] = "cosine",
-) -> Tuple[Tuple[float, float, float, float, float], Tuple[float, float]]:
+) -> Tuple[Tuple[float, float, float, float, float], Tuple[np.ndarray, np.ndarray]]:
     ...
 
 
@@ -255,11 +253,11 @@ def t2i(
     images: np.ndarray,
     captions: np.ndarray,
     *,
-    return_ranks: bool=False,
+    return_ranks: bool = False,
     npts: int = None,
     measure: Literal["cosine"] = "cosine",
 ) -> Union[
-    Tuple[Tuple[float, float, float, float, float], Tuple[float, float]],
+    Tuple[Tuple[float, float, float, float, float], Tuple[np.ndarray, np.ndarray]],
     Tuple[float, float, float, float, float],
 ]:
     """
@@ -285,14 +283,14 @@ def t2i(
         for i in range(len(inds)):
             inds[i] = np.argsort(d[i])[::-1]
             ranks[5 * index + i] = np.where(inds[i] == index)[0][0]
-            top1[5 * index + i] = inds[i][0]
+            top1[5 * index + i] = inds[i][0]  # type: ignore
 
     # compute metrics
     r1 = 100.0 * len(np.where(ranks < 1)[0]) / len(ranks)
     r5 = 100.0 * len(np.where(ranks < 5)[0]) / len(ranks)
     r10 = 100.0 * len(np.where(ranks < 10)[0]) / len(ranks)
-    medr = np.floor(np.median(ranks)) + 1
-    meanr = ranks.mean() + 1
+    medr: float = np.floor(np.median(ranks)) + 1  # type: ignore
+    meanr: float = ranks.mean() + 1
     if return_ranks:
         return (r1, r5, r10, medr, meanr), (ranks, top1)
     else:
@@ -317,11 +315,12 @@ def test_trees(model_path: str):
 
     print("Loading dataset")
     data_loader = get_eval_loader(
-        opt.data_path,
-        "test",
-        vocab,
-        opt.batch_size,
-        opt.workers,
+        data_path=opt.data_path,
+        split_name="test",
+        vocab=vocab,
+        batch_size=opt.batch_size,
+        workers=opt.workers,
+        subword=opt.init_embedding_type == "subword",
         load_img=False,
         img_dim=opt.img_dim,
     )
@@ -331,7 +330,7 @@ def test_trees(model_path: str):
     trees = list()
     for i, (images, captions, lengths, ids) in enumerate(data_loader):
         # make sure val logger is used
-        model.logger = print
+        model.logger = print  # type: ignore # TODO: This actually looks unsafe. But "if it aint broke, ..."
         lengths = torch.Tensor(lengths).long()
         if torch.cuda.is_available():
             lengths = lengths.cuda()

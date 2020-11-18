@@ -18,10 +18,10 @@ from torch.utils.data import DataLoader
 
 def train(
     opt: Namespace,
-    train_loader: "DataLoader[data.PrecompDatasetExample, data.PrecompDataLoaderBatch]",
+    train_loader: "DataLoader[data._Example, data.PrecompDataLoaderBatch]",
     model: VGNSL,
     epoch: int,
-    val_loader: "DataLoader[data.PrecompDatasetExample, data.PrecompDataLoaderBatch]",
+    val_loader: "DataLoader[data._Example, data.PrecompDataLoaderBatch]",
     vocab: Vocabulary,
 ) -> None:
     # average meters to record the training statistics
@@ -73,7 +73,7 @@ def train(
 
 def validate(
     opt: Namespace,
-    val_loader: "DataLoader[data.PrecompDatasetExample, data.PrecompDataLoaderBatch]",
+    val_loader: "DataLoader[data._Example, data.PrecompDataLoaderBatch]",
     model: VGNSL,
     vocab: Vocabulary,
 ) -> float:
@@ -120,7 +120,9 @@ def adjust_learning_rate(
         param_group["lr"] = lr
 
 
-def accuracy(output: torch.Tensor, target: torch.Tensor, topk: Tuple[int, ...] = (1,)) -> List[float]:
+def accuracy(
+    output: torch.Tensor, target: torch.Tensor, topk: Tuple[int, ...] = (1,)
+) -> List[float]:
     """Computes the precision@k for the specified values of k"""
     maxk = max(topk)
     batch_size = target.size(0)
@@ -221,10 +223,12 @@ if __name__ == "__main__":
         default="override",
     )
     parser.add_argument(
-        "--init_embeddings_key", choices=["glove", "fasttext", "bert"], default="override",
+        "--init_embeddings_key",
+        choices=["glove", "fasttext", "bert"],
+        default="override",
         help="If set, we will use one of 'vocab.pkl.glove_embeddings.npy', "
         "'vocab.pkl.fasttext_embeddings.npy', 'vocab.pkl.bert_embeddings.npy' to initalize "
-        " embeddings."
+        " embeddings.",
     )
     parser.add_argument("--init_embeddings_partial_dim", type=int, default=0)
 
@@ -275,13 +279,22 @@ if __name__ == "__main__":
     opt.vocab_size = len(vocab)
 
     if opt.init_embeddings:
+        if opt.init_embeddings_key == "bert" ^ opt.init_embeddings_type == "subword":
+            raise Exception(
+                " --init_embeddings_key bert (must) go along -- --init_embeddings_type subword."
+            )
+
         opt.vocab_init_embeddings = os.path.join(
             opt.data_path, f"vocab.pkl.{opt.init_embeddings_key}_embeddings.npy"
         )
 
     # Load data loaders
     train_loader, val_loader = data.get_train_loaders(
-        opt.data_path, vocab, opt.batch_size, opt.workers
+        opt.data_path,
+        vocab,
+        opt.batch_size,
+        opt.workers,
+        subword=opt.init_embeddings_type == "subword",
     )
 
     # construct the model
