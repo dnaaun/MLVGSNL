@@ -39,9 +39,8 @@ class SubwordEmbedder(nn.Module):
         super().__init__()
         self._padding_idx = padding_idx
         self._subword_embs = nn.Embedding(vocab_size, dim, padding_idx=padding_idx)
-        # if init_embs is not None:
-        # with torch.no_grad():
-        # self._subword_embs.weight.copy_(init_embs.detach())
+        if init_embs is not None:
+            self._subword_embs.weight.detach().copy_(init_embs)
 
         self._zero: nn.Parameter
         self.register_buffer(
@@ -117,7 +116,7 @@ def tree2str(tree):
     return "( " + " ".join(items) + " )"
 
 
-def make_embeddings(opt: Namespace, vocab_size: int, dim: int) -> "nn.Module[Tensor]":
+def make_embeddings(opt: Namespace, vocab_size: int, dim: int) -> nn.Module:
     init_embeddings = None
     if hasattr(opt, "vocab_init_embeddings"):
         init_embeddings = torch.from_numpy(np.load(opt.vocab_init_embeddings))
