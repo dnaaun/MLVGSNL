@@ -1,4 +1,5 @@
 from typing import Collection, Any, List, Tuple, TypeVar, NewType, TypedDict
+from torch import Tensor
 from argparse import Namespace, ArgumentParser
 import tqdm
 import logging
@@ -18,10 +19,10 @@ from torch.utils.data import DataLoader
 
 def train(
     opt: Namespace,
-    train_loader: "DataLoader[data._Example, data.PrecompDataLoaderBatch]",
+    train_loader: "DataLoader",
     model: VGNSL,
     epoch: int,
-    val_loader: "DataLoader[data._Example, data.PrecompDataLoaderBatch]",
+    val_loader: "DataLoader",
     vocab: Vocabulary,
 ) -> None:
     # average meters to record the training statistics
@@ -73,13 +74,17 @@ def train(
 
 def validate(
     opt: Namespace,
-    val_loader: "DataLoader[data._Example, data.PrecompDataLoaderBatch]",
+    val_loader: "DataLoader",
     model: VGNSL,
     vocab: Vocabulary,
 ) -> float:
     # compute the encoding for all the validation images and captions
     img_embs, cap_embs = encode_data(
-        model, val_loader, opt.log_step, logger.info, vocab
+        model,
+        val_loader,
+        vocab,
+        opt.log_step,
+        logger.info,
     )
     # caption retrieval
     (r1, r5, r10, medr, meanr) = i2t(img_embs, cap_embs, measure="cosine")
@@ -104,7 +109,7 @@ def save_checkpoint(
     filename: str = "checkpoint.pth.tar",
     prefix: str = "",
 ) -> None:
-    torch.save(state, prefix + filename)  # type: ignore[no-untyped-call]
+    torch.save(state, prefix + filename)
     if is_best:
         shutil.copyfile(prefix + filename, prefix + "model_best.pth.tar")
     shutil.copyfile(prefix + filename, prefix + str(curr_epoch) + ".pth.tar")
@@ -122,7 +127,7 @@ def adjust_learning_rate(
 
 def accuracy(
     output: torch.Tensor, target: torch.Tensor, topk: Tuple[int, ...] = (1,)
-) -> List[float]:
+) -> List[Tensor]:
     """Computes the precision@k for the specified values of k"""
     maxk = max(topk)
     batch_size = target.size(0)
@@ -233,16 +238,18 @@ if __name__ == "__main__":
     parser.add_argument("--init_embeddings_partial_dim", type=int, default=0)
 
     parser.add_argument("--syntax_score", default="conv", choices=["conv", "dynamic"])
-    parser.add_argument("--syntax_dim", type=int, default=300)
+    # Currently, syntax is tied with semantics, so we just use word_dim
+    # parser.add_argument("--syntax_dim", type=int, default=300)
 
     # For syntax_score == 'conv'
     parser.add_argument("--syntax_score_hidden", type=int, default=128)
     parser.add_argument("--syntax_score_kernel", type=int, default=5)
     parser.add_argument("--syntax_dropout", type=float, default=0.1)
 
-    parser.add_argument("--syntax_tied_with_semantics", type=int, default=1)
-    parser.add_argument("--syntax_embedding_norm_each_time", type=int, default=1)
-    parser.add_argument("--semantics_embedding_norm_each_time", type=int, default=1)
+    # Not used currently
+    # parser.add_argument("--syntax_tied_with_semantics", type=int, default=1)
+    # parser.add_argument("--syntax_embedding_norm_each_time", type=int, default=1)
+    # parser.add_argument("--semantics_embedding_norm_each_time", type=int, default=1)
 
     parser.add_argument("--vse_reward_alpha", type=float, default=1.0)
     parser.add_argument("--vse_loss_alpha", type=float, default=1.0)
@@ -254,6 +261,9 @@ if __name__ == "__main__":
         help="penalization for head-initial inductive bias",
     )
     opt = parser.parse_args()
+
+    # Syntax is tied with semantics
+    opt.syntax_dim = opt.word_dim
 
     # setup logger
     if os.path.exists(opt.logger_name):
@@ -272,14 +282,10 @@ if __name__ == "__main__":
     logger.addHandler(console)
     logger.propagate = False
 
-    # load predefined vocabulary and pretrained word embeddings if applicable
-    vocab: Vocabulary = pickle.load(
-        open(os.path.join(opt.data_path, "vocab.pkl"), "rb")
-    )
-    opt.vocab_size = len(vocab)
-
     if opt.init_embeddings:
-        if opt.init_embeddings_key == "bert" ^ opt.init_embeddings_type == "subword":
+        if (opt.init_embeddings_key == "bert") != (
+            opt.init_embeddings_type == "subword"
+        ):
             raise Exception(
                 " --init_embeddings_key bert (must) go along -- --init_embeddings_type subword."
             )
@@ -287,6 +293,16 @@ if __name__ == "__main__":
         opt.vocab_init_embeddings = os.path.join(
             opt.data_path, f"vocab.pkl.{opt.init_embeddings_key}_embeddings.npy"
         )
+
+    # load predefined vocabulary and pretrained word embeddings if applicable
+    if opt.init_embeddings_type == "subword":
+        vocab_filename = "vocab_subword.pkl"
+    else:
+        vocab_filename = "vocab.pkl"
+    vocab: Vocabulary = pickle.load(
+        open(os.path.join(opt.data_path, vocab_filename), "rb")
+    )
+    opt.vocab_size = len(vocab)
 
     # Load data loaders
     train_loader, val_loader = data.get_train_loaders(
@@ -321,7 +337,7 @@ if __name__ == "__main__":
             CheckpointData(
                 {
                     "epoch": epoch + 1,
-                    "model": model.state_dict(),  # type: ignore[no-untyped-call]
+                    "model": model.state_dict(),
                     "best_rsum": best_rsum,
                     "opt": opt,
                     "Eiters": model.Eiters,

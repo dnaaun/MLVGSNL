@@ -1,21 +1,32 @@
 import os
 import pickle
 
-from typing import TYPE_CHECKING, Dict, Callable, Any, Optional, Tuple, overload, Union
+from typing import (
+    TYPE_CHECKING,
+    Dict,
+    Callable,
+    Any,
+    Optional,
+    Tuple,
+    overload,
+    Union,
+    cast,
+)
 from typing_extensions import Literal
 import time
-import numpy as np  # type: ignore
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from collections import OrderedDict
 
 from model import VGNSL
-from data import get_eval_loader, PrecompDataLoaderBatch, _Example
+from data import get_eval_loader, PrecompDsetBatch, _Example, PrecompDsetBase
 from vocab import Vocabulary
 from utils import generate_tree, clean_tree
 
 if TYPE_CHECKING:
     from train import CheckpointData
+    from data import PrecompDLoader, _Example
 
 
 class AverageMeter:
@@ -70,16 +81,16 @@ class LogCollector:
 
 def encode_data(
     model: VGNSL,
-    data_loader: "DataLoader[_Example, PrecompDataLoaderBatch]",
+    data_loader: DataLoader,
+    vocab: Vocabulary,
     log_step: int = 10,
     logging: Callable[[Any], None] = print,
-    vocab: Optional[Vocabulary] = None,
     stage: Literal["dev", "test", "train"] = "dev",
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Encode all images and captions loadable by `data_loader`"""
     batch_time = AverageMeter()
     val_logger = LogCollector()
-    # switch to evaluate mode
+    # switch to evaluate modPrecompDsetBase
     model.val_start()
 
     end = time.time()
@@ -113,8 +124,16 @@ def encode_data(
             logged = True
             if stage == "dev":
                 sample_num = 5
-            for j in range(sample_num):
-                logging(generate_tree(captions, tree_indices, j, vocab))
+            for j in range(sample_num):  # type: ignore # FIXME:
+                logging(
+                    generate_tree(
+                        captions,
+                        tree_indices,
+                        j,
+                        vocab,
+                        subword=cast(PrecompDsetBase, data_loader.dataset).subword,
+                    )
+                )
 
         cap_emb = torch.cat(
             [cap_span_features[l - 2][i].reshape(1, -1) for i, l in enumerate(lengths)],
@@ -304,7 +323,10 @@ def test_trees(model_path: str):
     opt = checkpoint["opt"]
 
     # load vocabulary used by the model
-    vocab = pickle.load(open(os.path.join(opt.data_path, "vocab.pkl"), "rb"))
+    vocab_file = "vocab.pkl"
+    if opt.init_embeddings_type == "subword":
+        vocab_file = "vocab_subword.pkl"
+    vocab = pickle.load(open(os.path.join(opt.data_path, vocab_file), "rb"))
     opt.vocab_size = len(vocab)
 
     # construct model
@@ -320,7 +342,7 @@ def test_trees(model_path: str):
         vocab=vocab,
         batch_size=opt.batch_size,
         workers=opt.workers,
-        subword=opt.init_embedding_type == "subword",
+        subword=opt.init_embeddings_type == "subword",
         load_img=False,
         img_dim=opt.img_dim,
     )
@@ -350,7 +372,15 @@ def test_trees(model_path: str):
 
         candidate_trees = list()
         for j in range(len(ids)):
-            candidate_trees.append(generate_tree(captions, tree_indices, j, vocab))
+            candidate_trees.append(
+                generate_tree(
+                    captions,
+                    tree_indices,
+                    j,
+                    vocab,
+                    cast(PrecompDsetBase, data_loader.dataset).subword,
+                )
+            )
         appended_trees = ["" for _ in range(len(ids))]
         for j in range(len(ids)):
             appended_trees[ids[j] - min(ids)] = clean_tree(candidate_trees[j])

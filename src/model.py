@@ -1,5 +1,5 @@
-from typing import TYPE_CHECKING, List, Dict, Any
-import numpy as np  # type: ignore
+from typing import TYPE_CHECKING, List, Dict, Any, cast, Tuple
+import numpy as np
 from argparse import Namespace
 import logging
 from collections import OrderedDict
@@ -7,6 +7,7 @@ from collections import OrderedDict
 import torch
 from torch import Tensor
 import torch.backends.cudnn as cudnn
+import torch.cuda
 import torch.nn as nn
 import torch.nn.init
 import torchvision.models as models  # type: ignore
@@ -30,13 +31,8 @@ import utils, data
 if TYPE_CHECKING:
     from evaluation import LogCollector
 
-if TYPE_CHECKING:
-    ModuleBase = nn.Module[Tensor]
-else:
-    ModuleBase = nn.Module
 
-
-class EncoderImagePrecomp(ModuleBase):
+class EncoderImagePrecomp(nn.Module):
     """ image encoder """
 
     def __init__(self, img_dim: int, embed_size: int, no_imgnorm: bool = False) -> None:
@@ -44,6 +40,7 @@ class EncoderImagePrecomp(ModuleBase):
         self.embed_size = embed_size
         self.no_imgnorm = no_imgnorm
 
+        # (EmbedD, ImgD)
         self.fc = nn.Linear(img_dim, embed_size)
 
         self.init_weights()
@@ -52,11 +49,16 @@ class EncoderImagePrecomp(ModuleBase):
         """ Xavier initialization for the fully connected layer """
         r = np.sqrt(6.0) / np.sqrt(self.fc.in_features + self.fc.out_features)
         self.fc.weight.data.uniform_(-r, r)
-        self.fc.bias.data.fill_(0)
+        cast(Tensor, self.fc.bias).data.fill_(0)
 
-    def forward(self, images: Tensor) -> Tensor:
+    def forward(
+        self,
+        # (B, ImgD)
+        images: Tensor,
+    ) -> Tensor:
         """ extract image feature vectors """
         # assuming that the precomputed features are already l2-normalized
+        # (B, EmbedD)
         features: Tensor = self.fc(images.float())
 
         # normalize in the joint embedding space
@@ -65,9 +67,9 @@ class EncoderImagePrecomp(ModuleBase):
 
         return features
 
-    def load_state_dict(self, state_dict: Dict[str, Tensor]) -> None:
-        """ copies parameters, overwritting the default one to
-            accept state_dict from Full model """
+    def load_state_dict(self, state_dict: Dict[str, Tensor]) -> None:  # type: ignore
+        """copies parameters, overwritting the default one to
+        accept state_dict from Full model"""
         own_state = self.state_dict()
         new_state = OrderedDict()
         for name, param in state_dict.items():
@@ -77,17 +79,19 @@ class EncoderImagePrecomp(ModuleBase):
         super(EncoderImagePrecomp, self).load_state_dict(new_state)
 
 
-class EncoderText(ModuleBase):
+class EncoderText(nn.Module):
     """ text encoder """
 
     def __init__(self, opt: Namespace, vocab_size: int, semantics_dim: int) -> None:
         super(EncoderText, self).__init__()
-        opt.syntax_dim = semantics_dim  # syntax is tied with semantics
 
         self.vocab_size = vocab_size
         self.semantics_dim = semantics_dim
 
+        # (V, WordD) # This shape is "effectively". The actual impl is more complicated.
         self.sem_embedding = make_embeddings(opt, self.vocab_size, self.semantics_dim)
+
+        # (1, 2*WordD)
         self.syn_score = nn.Sequential(
             nn.Linear(opt.syntax_dim * 2, opt.syntax_score_hidden),
             nn.ReLU(),
@@ -96,10 +100,32 @@ class EncoderText(ModuleBase):
         # self.reset_weights()
 
     def reset_weights(self) -> None:
-        self.sem_embedding.weight.data.uniform_(-0.1, 0.1)
+        self.sem_embedding.weight.data.uniform_(-0.1, 0.1)  # type: ignore
 
-    def forward(self, x: Tensor, lengths: Tensor, volatile: bool = False):
-        """ sample a tree for each sentence """
+    def forward(
+        self,
+        # (B, L) or (B, L, S)
+        x: Tensor,
+        # (B,)
+        lengths: Tensor,
+        volatile: bool = False,
+    ) -> Tuple[
+        List[Tensor],
+        List[Tensor],
+        List[Tensor],
+        Tensor,
+        List[Tensor],
+        List[Tensor],
+        List[Tensor],
+    ]:
+        """sample a tree for each sentence:
+
+        Args:
+            volatile: Whether to sample during selection of constituent pairs to be joined,
+                      or to simply pick the most lkely one. During train, volatile=True, during
+                      eval, volatile=False.
+        """
+        # Note sure why dim=0 needed, lenghts should be a 1dim arr
         max_select_cnt = int(lengths.max(dim=0)[0].item()) - 1
 
         tree_indices = list()
@@ -110,79 +136,116 @@ class EncoderText(ModuleBase):
         right_span_features = list()
 
         # closed range: [left_bounds[i], right_bounds[i]]
+        # (B, max_select_cnt)
         left_bounds = utils.add_dim(
             torch.arange(0, max_select_cnt + 1, dtype=torch.long, device=x.device),
             0,
             x.size(0),
         )
+        # (B, max_select_cnt)
         right_bounds = left_bounds
 
+        # (B, L, WordD)
         sem_embeddings = self.sem_embedding(x)
+        # (B, L, WordD)
         syn_embeddings = sem_embeddings
 
+        # (B, L, WordD)
         output_word_embeddings = (
             sem_embeddings
-            * sequence_mask(lengths, max_length=lengths.max()).unsqueeze(-1).float()
+            *
+            # (B, L, 1)
+            sequence_mask(lengths, max_length=lengths.max()).unsqueeze(-1).float()
         )
 
         valid_bs = lengths.size(0)
         for i in range(max_select_cnt):
             seq_length = sem_embeddings.size(1)
+
             # set invalid positions to 0 prob
             # [0, 0, ..., 1, 1, ...]
+            # (B, L-1)
             length_mask = (
                 1
                 - sequence_mask(
                     (lengths - 1 - i).clamp(min=0), max_length=seq_length - 1
                 ).float()
             )
+
             # 0 = done
+            # (B,)
             undone_mask = 1 - length_mask[:, 0]
 
+            # (B, L-1, 2*WordDim)
             syn_feats = torch.cat(
                 (l2norm(syn_embeddings[:, 1:]), l2norm(syn_embeddings[:, :-1])), dim=2
             )
+
+            # (B, L-1)
             prob_logits = self.syn_score(syn_feats).squeeze(-1)
 
+            # (B, L-1)
             prob_logits = prob_logits - 1e10 * length_mask
+
+            # (B, L-1)
             probs = F.softmax(prob_logits, dim=1)
 
+            indices: Tensor
             if not volatile:
                 sampler = Categorical(probs)
+                # (B,)
                 indices = sampler.sample()
             else:
                 indices = probs.max(1)[1]
             tree_indices.append(indices)
+
+            #                    (B, L-1)
             tree_probs.append(index_one_hot_ellipsis(probs, 1, indices))
 
+            # (B, 2*max_select_cnt)
             this_spans = torch.stack(
                 [
+                    #  (B, max_select_cnt)
                     index_one_hot_ellipsis(left_bounds, 1, indices),
+                    #  (B, max_select_cnt)
                     index_one_hot_ellipsis(right_bounds, 1, indices + 1),
                 ],
                 dim=1,
             )
             this_features = torch.add(
+                # (B, L, WordD)
                 index_one_hot_ellipsis(sem_embeddings, 1, indices),
+                # (B, L, WordD)
                 index_one_hot_ellipsis(sem_embeddings, 1, indices + 1),
             )
+            # (B, L, WordD)
             this_left_features = index_one_hot_ellipsis(sem_embeddings, 1, indices)
+            # (B, L, WordD)
             this_right_features = index_one_hot_ellipsis(sem_embeddings, 1, indices + 1)
+            # (B, L, WordD)
             this_features = l2norm(this_features)
+            # (B, L, WordD)
             this_left_features = l2norm(this_left_features)
+            # (B, L, WordD)
             this_right_features = l2norm(this_right_features)
 
             span_bounds.append(this_spans)
+
+            # (B, L, WordD)
             features.append(l2norm(this_features) * undone_mask.unsqueeze(-1).float())
+            # (B, L, WordD)
             left_span_features.append(
                 this_left_features * undone_mask.unsqueeze(-1).float()
             )
+            # (B, L, WordD)
             right_span_features.append(
                 this_right_features * undone_mask.unsqueeze(-1).float()
             )
 
             # update word embeddings
+            # (B, L)
             left_mask = sequence_mask(indices, max_length=seq_length).float()
+            # (B, L)
             right_mask = 1 - sequence_mask(indices + 2, max_length=seq_length).float()
             center_mask = index_mask(indices, max_length=seq_length).float()
             update_masks = (left_mask, right_mask, center_mask)
@@ -230,7 +293,7 @@ class EncoderText(ModuleBase):
         )
 
 
-class ContrastiveReward(ModuleBase):
+class ContrastiveReward(nn.Module):
     """ compute contrastive reward """
 
     def __init__(self, margin: int = 0):
@@ -266,7 +329,7 @@ class ContrastiveReward(ModuleBase):
         return reward_s + reward_im
 
 
-class ContrastiveLoss(ModuleBase):
+class ContrastiveLoss(nn.Module):
     """ compute contrastive loss for VSE """
 
     def __init__(self, margin: int = 0):
@@ -351,16 +414,30 @@ class VGNSL(object):
         self.txt_enc.eval()
 
     def forward_emb(
-        self, images: Tensor, captions: Tensor, lengths: Tensor, volatile: bool = False,
+        self,
+        images: Tensor,  # (B, ImgD)
+        captions: Tensor,  # (B, L) or # (B, L, S)
+        lengths: Tensor,  # (B,)
+        volatile: bool = False,
     ):
-        """Compute the image and caption embeddings
-        """
+        """Compute the image and caption embeddings"""
         # Set mini-batch dataset
         if torch.cuda.is_available():
             images = images.cuda()
             captions = captions.cuda()
         with torch.set_grad_enabled(not volatile):
+            # (B, EmbedD)
             img_emb = self.img_enc(images)
+
+            txt_outputs: Tuple[
+                List[Tensor],
+                List[Tensor],
+                List[Tensor],
+                Tensor,
+                List[Tensor],
+                List[Tensor],
+                List[Tensor],
+            ]
             txt_outputs = self.txt_enc(captions, lengths, volatile)
         return (img_emb,) + txt_outputs
 
@@ -375,8 +452,7 @@ class VGNSL(object):
         span_bounds,
         **kwargs
     ):
-        """Compute the loss given pairs of image and caption embeddings
-        """
+        """Compute the loss given pairs of image and caption embeddings"""
         reward_matrix = torch.zeros(base_img_emb.size(0), lengths.max(0)[0] - 1).float()
         left_reg_matrix = torch.zeros(
             base_img_emb.size(0), lengths.max(0)[0] - 1
@@ -431,7 +507,9 @@ class VGNSL(object):
 
     def train_emb(
         self,
+        # (B, ImgD)
         images: Tensor,
+        # (B, L) or (B, L, S)
         captions: Tensor,
         lengths: List[int],
         ids: List[int] = None,
@@ -444,6 +522,7 @@ class VGNSL(object):
         self.logger.update("lr", self.optimizer.param_groups[0]["lr"])
 
         # Conver to tensor
+        # (B,)
         tensor_lengths = Tensor(lengths).long()
 
         if torch.cuda.is_available():

@@ -27,17 +27,21 @@ if TYPE_CHECKING:
 
 
 _T = TypeVar("_T")
+
 _WordExample = Tuple[Tensor, Tensor, int, int]
 _SubwordExample = Tuple[Tensor, List[List[int]], int, int]
 _Example = TypeVar("_Example", _WordExample, _SubwordExample)
 
+PrecompDsetBatch = Tuple[Tensor, Tensor, List[int], List[int]]
 
-class PrecompDatasetBase(data.Dataset, Generic[_Example]):
+
+class PrecompDsetBase(data.Dataset, Generic[_Example]):
     """Handles image related dataset loading. Captions are handled by subclasses. Not meant
     to be instantiated directly.
     """
 
     captions: List[List[Any]]
+    subword: bool
 
     def __init__(
         self,
@@ -56,11 +60,13 @@ class PrecompDatasetBase(data.Dataset, Generic[_Example]):
             caps_per_img = int(f.read().strip())
 
         # image features
+        # (DsetL, ImgD)
         if load_img:
             self.images: "np.ndarray[np.float64]" = np.load(
                 os.path.join(data_path, f"{data_split}_ims.npy")
             )
         else:
+            # (DsetL, ImgD)
             self.images = np.zeros((len(self) // caps_per_img, img_dim))
 
         assert self.images.shape[0] * caps_per_img == len(self)
@@ -74,10 +80,11 @@ class PrecompDatasetBase(data.Dataset, Generic[_Example]):
         return len(self.captions)
 
 
-class PrecompSubwordDataset(PrecompDatasetBase[_SubwordExample]):
+class PrecompSubwordDataset(PrecompDsetBase[_SubwordExample]):
     """ load precomputed captions and image features, but using subword tokenization """
 
     _SUBWORD_SEP = "|"
+    subword = True
 
     def prepare_captions(self) -> None:
         self.captions = []
@@ -96,7 +103,10 @@ class PrecompSubwordDataset(PrecompDatasetBase[_SubwordExample]):
     def __getitem__(self, index: int) -> _SubwordExample:
         # image
         img_id = index // self.caps_per_img
+
+        # (ImgD,)
         image = torch.tensor(self.images[img_id])
+
         # caption
         caption = [
             [self.vocab(token) for token in tokens]
@@ -105,7 +115,7 @@ class PrecompSubwordDataset(PrecompDatasetBase[_SubwordExample]):
         return image, caption, index, img_id
 
     @staticmethod
-    def collate_fn(data: List[_SubwordExample]) -> PrecompDataLoaderBatch:
+    def collate_fn(data: List[_SubwordExample]) -> PrecompDsetBatch:
         """ build mini-batch tensors from a list of (image, caption) tuples """
         # sort a data list by caption length
         # I don't know why though, apart from getting the max seq length. But that is doable
@@ -117,23 +127,34 @@ class PrecompSubwordDataset(PrecompDatasetBase[_SubwordExample]):
         ids: List[int]
         img_ids: List[int]
         images, captions, ids, img_ids = (list(_) for _ in zip(*data))
+
+        # (B, ImgD)
         stacked_images = torch.stack(images, 0)
 
         max_seq_len = len(captions[0])
         max_num_subword_per_word = max(
             len(subwords_per_word) for subwords_per_word in chain(*captions)
         )
-        targets = torch.zeros(len(captions), max_seq_len, max_num_subword_per_word).long()
+
+        # (B, ImgD, S)
+        targets = torch.zeros(
+            len(captions), max_seq_len, max_num_subword_per_word
+        ).long()
+
         lengths = [len(cap) for cap in captions]
         for sent_num, sent in enumerate(captions):
             for word_num, word in enumerate(sent):
                 end = len(word)
-                targets[sent_num, word_num, :end] = word
+                targets[sent_num, word_num, :end] = torch.tensor(
+                    word, device=stacked_images.device
+                )
         return stacked_images, targets, lengths, ids
 
 
-class PrecompWordDataset(PrecompDatasetBase[_WordExample]):
+class PrecompWordDataset(PrecompDsetBase[_WordExample]):
     """ load precomputed captions and image features """
+
+    subword = False
 
     def prepare_captions(self) -> None:
         # captions
@@ -153,31 +174,41 @@ class PrecompWordDataset(PrecompDatasetBase[_WordExample]):
     def __getitem__(self, index: int) -> _WordExample:
         # image
         img_id = index // self.caps_per_img
+
+        # (ImgD,)
         image = torch.tensor(self.images[img_id])
-        # caption
+
         caption = [
             self.vocab(token)
             for token in ["<start>"] + self.captions[index] + ["<end>"]
         ]
+
+        # (l,)
         torch_caption = torch.tensor(caption)
         return image, torch_caption, index, img_id
 
     @staticmethod
-    def collate_fn(data: List[_WordExample]) -> PrecompDataLoaderBatch:
+    def collate_fn(data: List[_WordExample]) -> PrecompDsetBatch:
         """ build mini-batch tensors from a list of (image, caption) tuples """
         # sort a data list by caption length
         data.sort(key=lambda x: len(x[1]), reverse=True)
         images, captions, ids, img_ids = (list(_) for _ in zip(*data))
+
+        # (B, ImgD)
         stacked_images = torch.stack(images, 0)
+
+        # (B, L)
         targets = torch.zeros(len(captions), len(captions[0])).long()
         lengths = [len(cap) for cap in captions]
         for i, cap in enumerate(captions):
             end = len(cap)
             targets[i, :end] = cap[:end]
+
         return stacked_images, targets, lengths, ids
 
 
-PrecompDataLoaderBatch = Tuple[Tensor, Tensor, List[int], List[int]]
+if TYPE_CHECKING:
+    PrecompDLoader = data.DataLoader[_Example, PrecompDsetBatch]
 
 
 @overload
@@ -191,7 +222,7 @@ def get_precomp_loader(
     num_workers: int = 2,
     load_img: bool = True,
     img_dim: int = 2048,
-) -> "DataLoader[_WordExample, PrecompDataLoaderBatch]":
+) -> "PrecompDLoader[_Example]":
     ...
 
 
@@ -206,7 +237,7 @@ def get_precomp_loader(
     num_workers: int = 2,
     load_img: bool = True,
     img_dim: int = 2048,
-) -> "DataLoader[_SubwordExample, PrecompDataLoaderBatch]":
+) -> "PrecompDLoader[_Example]":
     ...
 
 
@@ -220,14 +251,14 @@ def get_precomp_loader(
     num_workers: int = 2,
     load_img: bool = True,
     img_dim: int = 2048,
-) -> "DataLoader[_Example, PrecompDataLoaderBatch]":
+) -> "PrecompDLoader[_Example]":
     dset: Union[PrecompWordDataset, PrecompSubwordDataset]
 
     if subword:
-        dset = PrecompWordDataset(data_path, data_split, vocab, load_img, img_dim)
-    else:
         dset = PrecompSubwordDataset(data_path, data_split, vocab, load_img, img_dim)
-    data_loader = DataLoader(  # type: ignore
+    else:
+        dset = PrecompWordDataset(data_path, data_split, vocab, load_img, img_dim)
+    data_loader = DataLoader(
         dataset=dset,
         batch_size=batch_size,
         shuffle=shuffle,
@@ -243,10 +274,7 @@ def get_train_loaders(
     batch_size: int,
     workers: int,
     subword: Union[Literal[True], Literal[False]],
-) -> Tuple[
-    "DataLoader[_Example, PrecompDataLoaderBatch]",
-    "DataLoader[_Example, PrecompDataLoaderBatch]",
-]:
+) -> Tuple["PrecompDLoader[_Example]", "PrecompDLoader[_Example]"]:
     train_loader = get_precomp_loader(
         data_path=data_path,
         data_split="train",
@@ -266,7 +294,7 @@ def get_train_loaders(
         num_workers=workers,
     )
 
-    return train_loader, val_loader  # type: ignore
+    return train_loader, val_loader
 
 
 def get_eval_loader(
@@ -278,7 +306,7 @@ def get_eval_loader(
     workers: int,
     load_img: bool = False,
     img_dim: int = 2048,
-) -> "DataLoader[_Example, PrecompDataLoaderBatch]":
+) -> DataLoader:
     eval_loader = get_precomp_loader(
         data_path=data_path,
         data_split=split_name,
@@ -290,4 +318,4 @@ def get_eval_loader(
         load_img=load_img,
         img_dim=img_dim,
     )
-    return eval_loader  # type: ignore
+    return eval_loader

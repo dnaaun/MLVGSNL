@@ -6,17 +6,14 @@ import torch
 from torch import Tensor
 import numpy as np
 import torch.nn as nn
-from typing import Sequence, Tuple, Union, List, TYPE_CHECKING
-
+from typing import Sequence, Tuple, Union, List, TYPE_CHECKING, cast, TypeVar, Optional
 
 if TYPE_CHECKING:
-    ModuleBase = nn.Module[Tensor]
-else:
-    ModuleBase = nn.Module
+    from vocab import Vocabulary
 
 
-class EmbeddingCombiner(ModuleBase):
-    def __init__(self, *embeddings: ModuleBase):
+class EmbeddingCombiner(nn.Module):
+    def __init__(self, *embeddings: nn.Module):
         super().__init__()
         self.embeddings = nn.ModuleList(embeddings)
 
@@ -24,7 +21,7 @@ class EmbeddingCombiner(ModuleBase):
         return torch.cat([e(input) for e in self.embeddings], dim=-1)
 
 
-class SubwordEmbedder(ModuleBase):
+class SubwordEmbedder(nn.Module):
     """Pools over subwords. Look at forward() for docs.
 
     THIS MODULE DEPENDS ON THE PADDING EMBEDDING BEING ALL ZEROS. IT WILL SET THIS IN __init__.
@@ -37,19 +34,23 @@ class SubwordEmbedder(ModuleBase):
     """
 
     def __init__(
-        self, vocab_size: int, dim: int, padding_idx=0, init_embs: Tensor = None
+        self, vocab_size: int, dim: int, padding_idx: int = 0, init_embs: Tensor = None
     ) -> None:
         super().__init__()
         self._padding_idx = padding_idx
         self._subword_embs = nn.Embedding(vocab_size, dim, padding_idx=padding_idx)
-        if init_embs is not None:
-            self._subword_embs.weight.data.copy_(init_embs)
+        # if init_embs is not None:
+        # with torch.no_grad():
+        # self._subword_embs.weight.copy_(init_embs.detach())
 
-        # Initialize zero vector here so that it gets moved to GPU automatically if necessary
-        self._zero = torch.tensor(0.0, requires_grad=False)
+        self._zero: nn.Parameter
+        self.register_buffer(
+            "_zero", nn.Parameter(torch.tensor(0.0, requires_grad=False))
+        )
 
         # Zero out the padding idx
-        self._subword_embs.weight[padding_idx] = self._zero
+        with torch.no_grad():
+            self._subword_embs.weight[padding_idx] = self._zero
 
     def forward(self, token_ids: Tensor) -> Tensor:
         """
@@ -126,22 +127,22 @@ def make_embeddings(opt: Namespace, vocab_size: int, dim: int) -> "nn.Module[Ten
         emb = nn.Embedding(vocab_size, dim, padding_idx=0)
         if init_embeddings is not None:
             if opt.init_embeddings_type == "override":
-                emb.weight.data.copy_(init_embeddings)
+                emb.weight.detach().copy_(init_embeddings)
             else:
                 assert opt.init_embeddings_type == "partial"
-                emb.weight.data[:, : init_embeddings.size(1)] = init_embeddings
+                emb.weight.detach()[:, : init_embeddings.size(1)] = init_embeddings
     elif opt.init_embeddings_type == "partial-fixed":
         partial_dim = opt.init_embeddings_partial_dim
         emb1 = nn.Embedding(vocab_size, partial_dim, padding_idx=0)
         emb2 = nn.Embedding(vocab_size, dim - partial_dim, padding_idx=0)
 
         if init_embeddings is not None:
-            emb1.weight.data.copy_(init_embeddings)
+            emb1.weight.data.detach().copy_(init_embeddings)
         emb1.weight.requires_grad_(False)
 
         emb = EmbeddingCombiner(emb1, emb2)
-    elif opt.init_embeddings_type == "bert":
-        emb = SubwordEmbedder(vocab_size, dim, init_embeddings)
+    elif opt.init_embeddings_type == "subword":
+        emb = SubwordEmbedder(vocab_size, dim, init_embs=init_embeddings)
     else:
         raise NotImplementedError()
 
@@ -166,7 +167,7 @@ def broadcast(tensor: Tensor, dim: int, size: int) -> Tensor:
     return tensor.expand(concat_shape(shape[:dim], size, shape[dim + 1 :]))
 
 
-def add_dim(tensor, dim: int, size: int) -> Tensor:
+def add_dim(tensor: Tensor, dim: int, size: int) -> Tensor:
     return broadcast(tensor.unsqueeze(dim), dim, size)
 
 
@@ -187,21 +188,45 @@ def l2norm(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
     return x / x.norm(2, dim=dim, keepdim=True).clamp(min=1e-6)  # type: ignore[no-untyped-call,no-any-return]
 
 
-def generate_tree(captions, tree_indices, pos, vocab, pad_word="<pad>"):
-    words = list(
-        filter(
-            lambda x: x != pad_word,
-            [
-                {"(": "**LP**", ")": "**RP**"}.get(
-                    vocab.idx2word[int(word)], vocab.idx2word[int(word)]
-                )
-                for word in captions[pos]
-            ],
-        )
-    )
+def generate_tree(
+    captions: Tensor,
+    tree_indices: Tensor,
+    pos: int,
+    vocab: "Vocabulary",
+    subword: bool,
+    pad_word="<pad>",
+    pad_word_id: int = 0,
+):
+    if subword:
+
+        def get_word_func(__word_ids: Tensor) -> Optional[str]:
+            subwords = [
+                vocab.idx2word[int(word_id)]
+                for word_id in __word_ids
+                if word_id != pad_word_id
+            ]
+            if subwords:
+                return "|".join(subwords)
+            return None
+
+    else:
+
+        def get_word_func(__word_id: Tensor) -> Optional[str]:
+            if __word_id == pad_word_id:
+                return None
+            return vocab.idx2word[int(__word_id)]
+
+    words = []
+    for word_ids in captions[pos]:
+        word = get_word_func(word_ids)
+        if word is None:
+            continue
+        word = {"(": "-LBR-", ")": "-RBR-"}.get(word, word)
+        words.append(word)
+
     idx = 0
     while len(words) > 1:
-        p = tree_indices[idx][pos]
+        p = cast(int, tree_indices[idx][pos])
         words = (
             words[:p]
             + ["( {:s} {:s} )".format(words[p], words[p + 1])]
@@ -211,32 +236,62 @@ def generate_tree(captions, tree_indices, pos, vocab, pad_word="<pad>"):
     return words[0]
 
 
-def sequence_mask(sequence_length, max_length=None):
+def sequence_mask(
+    # (B,)
+    sequence_length: Tensor,
+    max_length: Tensor = None,
+) -> Tensor:
+    """Returns a 2D binary tensor that can be used for masking padding positions."""
     if max_length is None:
         max_length = sequence_length.data.max()
     batch_size = sequence_length.size(0)
-    seq_range = torch.arange(0, max_length).long()
+
+    # (L,)
+    seq_range = torch.arange(0, max_length).long()  # type: ignore # Using a 0dim tensor
+
+    # (B, L)
     seq_range_expand = seq_range.unsqueeze(0).expand(batch_size, max_length)
-    seq_range_expand = seq_range_expand
+
     if sequence_length.is_cuda:
         seq_range_expand = seq_range_expand.cuda()
+
+    # (B, L)
     seq_length_expand = sequence_length.unsqueeze(1).expand_as(seq_range_expand)
+
+    # (B, L)
     return seq_range_expand < seq_length_expand
 
 
-def index_one_hot_ellipsis(tensor, dim, index):
+def index_one_hot_ellipsis(
+    # (B, *)
+    tensor: Tensor,
+    # Always 1 actually.
+    dim: int,
+    # (B,)
+    index: Tensor,
+) -> Tensor:
     tensor_shape = tensor.size()
+
+    # (B, *, 1)
     tensor = tensor.view(
         prod(tensor_shape[:dim]), tensor_shape[dim], prod(tensor_shape[dim + 1 :])
     )
     assert tensor.size(0) == index.size(0)
+
+    # (B,1,1)
     index = index.unsqueeze(-1).unsqueeze(-1)
+
+    # (B,1,1)
     index = index.expand(tensor.size(0), 1, tensor.size(2))
+
+    # (B,1,1)
     tensor = tensor.gather(1, index)
+
+    # (B, *)
     return tensor.view(tensor_shape[:dim] + tensor_shape[dim + 1 :])
 
 
-def index_mask(indices, max_length):
+def index_mask(indices: Tensor, max_length: int) -> Tensor:
     batch_size = indices.size(0)
     seq_range = torch.arange(0, max_length).long()
     seq_range_expand = seq_range.unsqueeze(0).expand(batch_size, max_length)
@@ -301,7 +356,10 @@ def length2mask(lengths, max_length):
     return mask.float()
 
 
-def prod(values, default=1):
+_Num = TypeVar("_Num", int, float)
+
+
+def prod(values: Sequence[_Num], default: int = 1) -> _Num:
     if len(values) == 0:
         return default
     return reduce(lambda x, y: x * y, values)
