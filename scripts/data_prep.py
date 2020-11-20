@@ -1,25 +1,20 @@
 #!/usr/bin/env python
-import gc
+# pyright: strict
+import shutil
 from more_itertools import chunked
 import pickle as pkl
-from functools import reduce
-from itertools import chain, islice
 from pathlib import Path
 import re
 from io import TextIOWrapper
 import typer
 import tqdm
 from typing import (
-    Generic,
-    TypeVar,
     TYPE_CHECKING,
-    Tuple,
+    Dict,
     Union,
     List,
-    Any,
     Counter,
     Set,
-    TextIO,
     Optional,
 )
 import zipfile, gzip
@@ -199,7 +194,7 @@ def get_subword_stats(subword_file: Path, subword_sep: str = "|") -> None:
         f"A few extreme counts: ",
         ", ".join(
             f"{num_words} words with {subwords_per_word}"
-            for  subwords_per_word, num_words in extreme_counts
+            for subwords_per_word, num_words in extreme_counts
         ),
     )
 
@@ -429,10 +424,7 @@ def _read_vocab(vocab_pkl_file: Path) -> Vocabulary:
 
 
 def _nltk_tree_to_paren(tree: Union[str, nltk.Tree]) -> str:
-    """Convert benepar parse output to something like
-
-
-    """
+    """Convert benepar parse output to something like"""
 
     if isinstance(tree, str):
         return tree
@@ -458,7 +450,7 @@ def parse_sents(
     allows benepar to work with Tensorflow2, which is the default installation. You can install it
     with
 
-        pip install git+https://github.com/udnaan/self-attentive-parser 
+        pip install git+https://github.com/udnaan/self-attentive-parser
 
     Args:
             test_caps_file: A text file where each word is separated by space, and one sentence per
@@ -467,8 +459,8 @@ def parse_sents(
             benepar_model_name: The name of the model to use. Find the right name from here:
                 https://github.com/nikitakit/self-attentive-parser#available-models
 
-                    """
-    benepar.download(benepar_model_name) # DOesn't do anything if already downloaded
+    """
+    benepar.download(benepar_model_name)  # DOesn't do anything if already downloaded
     parser = benepar.Parser(benepar_model_name, batch_size=batch_size)
 
     with test_caps_file.open() as f:
@@ -486,7 +478,9 @@ def parse_sents(
 
 @app.command()
 def extract_word_embs(
-    vocab_pkl_file: Path, output_npy_file: Path, all_embs_file: Path,
+    vocab_pkl_file: Path,
+    output_npy_file: Path,
+    all_embs_file: Path,
 ) -> None:
     """
 
@@ -509,6 +503,8 @@ def extract_word_embs(
 
     idx2vec = {}
 
+    text_file = None
+    compressed_file = None
     # Support both zip and gz. A zip file can possibly contain multiple files, but
     # we accept zip files containing only one file.
     # The gz file must be a compressed text file.
@@ -521,7 +517,7 @@ def extract_word_embs(
             )
 
         binary_file = compressed_file.open(files_in_zip[0])
-        text_file: TextIO = TextIOWrapper(binary_file)  # type: ignore[arg-type]
+        text_file = TextIOWrapper(binary_file)  # type: ignore[arg-type]
     elif all_embs_file.suffix == ".gz":
         if all_embs_file.stem.endswith(".tar"):
             raise Exception("We don't support .tar.gz currently, just .gz")
@@ -629,6 +625,137 @@ def extract_subword_embs(
 
     with output_npy_file.open("wb") as fb:
         np.save(fb, final_embs.cpu().numpy())
+
+
+def _concat_files(out_fp: Path, *in_fps: Path) -> List[int]:
+    """Returns the number of lines in each input file."""
+    lens = []
+    with out_fp.open("w") as out_f:
+        for in_fp in in_fps:
+            with in_fp.open() as in_f:
+                lines = in_f.readlines()
+                out_f.writelines(lines)
+                lens.append(len(lines))
+    return lens
+
+
+def _concat_vocabs(out_fp: Path, *in_fps: Path) -> None:
+    vocabs: List[Vocabulary] = [pkl.load(in_fp.open("rb")) for in_fp in in_fps]
+
+    lens = list(map(len, vocabs))
+    print(
+        "Read vocabs of len: " + ", ".join(map(str, lens)) + ". Total=" + str(sum(lens))
+    )
+
+    # NOTE: This relies on new_vocab.add_word assinging indices starting from zero and going up
+    new_vocab = Vocabulary()
+    for vocab in vocabs:
+        for i in range(len(vocab)):
+            new_vocab.add_word(vocab.idx2word[i])
+
+    print(f"Final vocab has {len(new_vocab)} words.")
+
+    with out_fp.open("wb") as out_f:
+        pkl.dump(new_vocab, out_f)
+
+
+def _concat_vecs(out_fp: Path, *in_fps: Path) -> List[int]:
+    """Returns lenghts (first dim) of input matrices."""
+    lens = []
+    vecs = [np.load(in_fp) for in_fp in in_fps]
+    lens = [len(vec) for vec in vecs]
+    all_vecs = np.concatenate(vecs, axis=0)
+    np.save(out_fp, all_vecs)
+    return lens
+
+
+def _concat_caps_per_img(
+    out_dir: Path, num_images_per_split: Dict[str, List[int]], *lang_dirs: Path
+) -> None:
+    print(f"Concatenating caps_per_img ...")
+    for split in ["train", "dev"]:
+        all_caps_per_img = []
+        num_images = num_images_per_split[split]
+        for exp_len, lang_dir in zip(num_images, lang_dirs):
+            # Keep the new line chars
+            specific = lang_dir / f"{split}_caps_per_img.txt"
+            generic = lang_dir / "caps_per_img.txt"
+            if generic.exists() and specific.exists():
+                raise Exception(
+                    f"Exactly one of {str(specific)} or {str(generic)} must exist."
+                )
+            elif generic.exists():
+                specific = generic
+
+            str_caps_per_img = specific.open().readlines()
+            if len(str_caps_per_img) == 1:
+                str_caps_per_img *= exp_len
+
+            if len(str_caps_per_img) != exp_len:
+                raise Exception(
+                    f"Expected {exp_len} lines (or only 1 line) in {str(lang_dir)}/caps_per_img.txt"
+                    ", got {len(str_caps_per_img)}"
+                )
+            all_caps_per_img.extend(str_caps_per_img)
+
+        with open(out_dir / f"{split}_caps_per_img.txt", "w") as f:
+            print(f"Writing {len(all_caps_per_img)} lines to {split}_caps_per_img.txt")
+            f.writelines(all_caps_per_img)
+
+
+@app.command()
+def join_langs(
+    out_dir: Path,
+    lang_dirs: List[Path] = typer.Argument(
+        None, help="The directories of the languages to join."
+    ),
+    emb_name: str = typer.Option(
+        "bert",
+        help="With default value, will concatenate vocabs named vocab.pkl.bert_embeddings.npy",
+    ),
+    subword: bool = typer.Option(
+        True,
+        help="If set, will look for files with '_subword' in them"
+        "instead of the regular version.",
+    ),
+) -> None:
+    subword_suffix = ""
+    if subword:
+        subword_suffix = "_subword"
+
+    print(f"Concatenating captions ...")
+    num_images_per_split: Dict[str, List[int]] = {}
+    for split in ["train", "dev"]:
+        f_name = f"{split}_caps{subword_suffix}.txt"
+        _concat_files(
+            out_dir / f_name, *[lang_dir / f_name for lang_dir in lang_dirs]
+        )
+        f_name = f"{split}_ims.npy"
+        lens = _concat_vecs(
+            out_dir / f_name, *[lang_dir / f_name for lang_dir in lang_dirs]
+        )
+        num_images_per_split[split] = lens
+        print(
+            f"For split {split}, concatenated vecs of lens: {lens}. Total={sum(lens)}."
+        )
+
+    print(f"Concatenating vocab ...")
+    vocab_f_name = f"vocab{subword_suffix}.pkl"
+    _concat_vocabs(
+        out_dir / vocab_f_name, *[lang_dir / vocab_f_name for lang_dir in lang_dirs]
+    )
+
+    emb_f_name = f"vocab{subword_suffix}.pkl.{emb_name}_embeddings.npy"
+    _concat_vecs(
+        out_dir / emb_f_name, *[lang_dir / emb_f_name for lang_dir in lang_dirs]
+    )
+
+    _concat_caps_per_img(out_dir, num_images_per_split, *lang_dirs)
+
+    print(f"Copying test files ...")
+    test_f_name = f"test_caps{subword_suffix}.txt"
+    for lang_dir in lang_dirs:
+        shutil.copy(lang_dir / test_f_name, out_dir / f"{lang_dir.name}_{test_f_name}")
 
 
 if __name__ == "__main__":

@@ -282,23 +282,24 @@ if __name__ == "__main__":
     logger.addHandler(console)
     logger.propagate = False
 
-    if opt.init_embeddings:
-        if (opt.init_embeddings_key == "bert") != (
-            opt.init_embeddings_type == "subword"
-        ):
-            raise Exception(
-                " --init_embeddings_key bert (must) go along -- --init_embeddings_type subword."
-            )
+    subword_suf = ""
+    if (opt.init_embeddings_key == "bert") != (
+        opt.init_embeddings_type == "subword"
+    ):
+        raise Exception(
+            " --init_embeddings_key bert (must) go along -- --init_embeddings_type subword."
+        )
+    elif opt.init_embeddings_type == "subword":
+        subword_suf = "_subword"
 
+    vocab_filename = f"vocab{subword_suf}.pkl"
+
+    if opt.init_embeddings:
         opt.vocab_init_embeddings = os.path.join(
-            opt.data_path, f"vocab.pkl.{opt.init_embeddings_key}_embeddings.npy"
+            opt.data_path, f"{vocab_filename}.{opt.init_embeddings_key}_embeddings.npy"
         )
 
-    # load predefined vocabulary and pretrained word embeddings if applicable
-    if opt.init_embeddings_type == "subword":
-        vocab_filename = "vocab_subword.pkl"
-    else:
-        vocab_filename = "vocab.pkl"
+    
     vocab: Vocabulary = pickle.load(
         open(os.path.join(opt.data_path, vocab_filename), "rb")
     )

@@ -238,11 +238,11 @@ def generate_tree(
 def sequence_mask(
     # (B,)
     sequence_length: Tensor,
-    max_length: Tensor = None,
+    max_length: int = None,
 ) -> Tensor:
     """Returns a 2D binary tensor that can be used for masking padding positions."""
     if max_length is None:
-        max_length = sequence_length.data.max()
+        max_length = cast(int, sequence_length.data.max().item())
     batch_size = sequence_length.size(0)
 
     # (L,)
@@ -290,13 +290,20 @@ def index_one_hot_ellipsis(
     return tensor.view(tensor_shape[:dim] + tensor_shape[dim + 1 :])
 
 
-def index_mask(indices: Tensor, max_length: int) -> Tensor:
+def index_mask(
+    # (B,)
+    indices: Tensor,
+    max_length: int,
+) -> Tensor:
+    """Returns mat m such that m[i,j] = True only if indices[i] == j"""
     batch_size = indices.size(0)
+    # (L,)
     seq_range = torch.arange(0, max_length).long()
+    # (B, L)
     seq_range_expand = seq_range.unsqueeze(0).expand(batch_size, max_length)
-    seq_range_expand = seq_range_expand
     if indices.is_cuda:
         seq_range_expand = seq_range_expand.cuda()
+    # B, L)
     indices_expand = indices.unsqueeze(1).expand_as(seq_range_expand)
     return seq_range_expand == indices_expand
 

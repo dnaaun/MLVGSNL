@@ -1,7 +1,6 @@
 from typing import TYPE_CHECKING, List, Dict, Any, cast, Tuple
 import numpy as np
 from argparse import Namespace
-import logging
 from collections import OrderedDict
 
 import torch
@@ -11,12 +10,9 @@ import torch.cuda
 import torch.nn as nn
 import torch.nn.init
 import torchvision.models as models  # type: ignore
-from torch.autograd import Variable
 from torch.distributions import Categorical
-from torch.nn import functional
 from torch.nn import functional as F
 from torch.nn.utils.clip_grad import clip_grad_norm_
-from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from utils import (
     make_embeddings,
@@ -26,7 +22,7 @@ from utils import (
     index_mask,
     index_one_hot_ellipsis,
 )
-import utils, data
+import utils
 
 if TYPE_CHECKING:
     from evaluation import LogCollector
@@ -146,7 +142,7 @@ class EncoderText(nn.Module):
         right_bounds = left_bounds
 
         # (B, L, WordD)
-        sem_embeddings = self.sem_embedding(x)
+        sem_embeddings: Tensor = self.sem_embedding(x)
         # (B, L, WordD)
         syn_embeddings = sem_embeddings
 
@@ -247,6 +243,7 @@ class EncoderText(nn.Module):
             left_mask = sequence_mask(indices, max_length=seq_length).float()
             # (B, L)
             right_mask = 1 - sequence_mask(indices + 2, max_length=seq_length).float()
+            # (B, L)
             center_mask = index_mask(indices, max_length=seq_length).float()
             update_masks = (left_mask, right_mask, center_mask)
 
@@ -280,7 +277,7 @@ class EncoderText(nn.Module):
         )
 
     @staticmethod
-    def update_with_mask(lv, rv, cv, lm, rm, cm):
+    def update_with_mask(lv: Tensor, rv: Tensor, cv: Tensor, lm: Tensor, rm: Tensor, cm: Tensor):
         if lv.dim() > lm.dim():
             lm = lm.unsqueeze(2)
             rm = rm.unsqueeze(2)
@@ -553,7 +550,7 @@ class VGNSL(object):
         probs = (
             torch.cat(probs, dim=0).reshape(-1, tensor_lengths.size(0)).transpose(0, 1)
         )
-        masks = sequence_mask(tensor_lengths - 1, tensor_lengths.max(0)[0] - 1).float()
+        masks = sequence_mask(tensor_lengths - 1, cast(int, (tensor_lengths.max(0)[0] - 1))).float()
         rl_loss = torch.sum(-masks * torch.log(probs) * cum_reward.detach())
 
         loss = rl_loss + matching_loss * self.vse_loss_alpha

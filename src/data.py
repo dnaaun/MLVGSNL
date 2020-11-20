@@ -11,6 +11,7 @@ from typing import (
     Union,
 )
 from typing_extensions import Literal
+from pathlib import Path
 import nltk  # type: ignore
 from itertools import chain
 import abc
@@ -56,8 +57,22 @@ class PrecompDsetBase(data.Dataset, Generic[_Example]):
         self.vocab = vocab
         self.prepare_captions()
 
-        with open(os.path.join(data_path, "caps_per_img.txt")) as f:
-            caps_per_img = int(f.read().strip())
+        generic_caps_per_img_fpath = Path(data_path) /  "caps_per_img.txt"
+        split_caps_per_img_fpath = Path(data_path) /  f"{data_split}_caps_per_img.txt"
+
+        if generic_caps_per_img_fpath.exists() == split_caps_per_img_fpath.exists():
+            raise Exception(f"Exactly one of {str(split_caps_per_img_fpath)} or {str(generic_caps_per_img_fpath)}"
+                    " must exist."
+                    )
+        elif generic_caps_per_img_fpath.exists():
+            split_caps_per_img_fpath = generic_caps_per_img_fpath
+
+        with split_caps_per_img_fpath.open() as f:
+            str_caps_per_img = [l.strip() for l in f]
+
+        # Allow last lines to be empty
+        while str_caps_per_img[-1] == "":
+            str_caps_per_img.pop()
 
         # image features
         # (DsetL, ImgD)
@@ -65,12 +80,42 @@ class PrecompDsetBase(data.Dataset, Generic[_Example]):
             self.images: "np.ndarray[np.float64]" = np.load(
                 os.path.join(data_path, f"{data_split}_ims.npy")
             )
-        else:
-            # (DsetL, ImgD)
-            self.images = np.zeros((len(self) // caps_per_img, img_dim))
 
-        assert self.images.shape[0] * caps_per_img == len(self)
+            # Allow one caption per image for entire dataset,
+            # or a caption per image equal separately for each image.
+            if len(str_caps_per_img) == 1:
+                caps_per_img = [int(str_caps_per_img[0])] * len(self.images)
+            else:
+                if not len(str_caps_per_img) == len(self.images):
+                    raise Exception(
+                        f"caps_per_img file length (which is {len(str_caps_per_img)} is neither one, nor equal to the "
+                        f"number of images(which is {len(self.images)}."
+                    )
+                caps_per_img = list(map(int, str_caps_per_img))
+
+            if not (num_exp_caps := sum(caps_per_img)) == len(self.captions):
+                raise Exception(
+                    f"THe total number of captions ({len(self.captions)}) is not equal to the value"
+                    " expected from caps_per_img.txt and the image features (that number is "
+                    f" {num_exp_caps})"
+                )
+
+        else:
+            caps_per_img = [1] * len(self.captions)
+            # (DsetL, ImgD)
+            self.images = np.zeros((len(self.captions), img_dim))
+
         self.caps_per_img = caps_per_img
+
+        # Build the mapping of caption number to image number
+        self.cap_idx_to_img_idx = {}
+        cur_img_num = 0
+        total_caps = 0
+        for img_num, img_per_cap in enumerate(self.caps_per_img):
+            total_caps += img_per_cap
+            while cur_img_num < total_caps:
+                self.cap_idx_to_img_idx[cur_img_num] = img_num
+                cur_img_num += 1
 
     @abc.abstractmethod
     def prepare_captions(self) -> None:
@@ -102,7 +147,7 @@ class PrecompSubwordDataset(PrecompDsetBase[_SubwordExample]):
 
     def __getitem__(self, index: int) -> _SubwordExample:
         # image
-        img_id = index // self.caps_per_img
+        img_id = self.cap_idx_to_img_idx[index]
 
         # (ImgD,)
         image = torch.tensor(self.images[img_id])
@@ -173,7 +218,7 @@ class PrecompWordDataset(PrecompDsetBase[_WordExample]):
 
     def __getitem__(self, index: int) -> _WordExample:
         # image
-        img_id = index // self.caps_per_img
+        img_id = self.cap_idx_to_img_idx[index]
 
         # (ImgD,)
         image = torch.tensor(self.images[img_id])
@@ -207,38 +252,6 @@ class PrecompWordDataset(PrecompDsetBase[_WordExample]):
         return stacked_images, targets, lengths, ids
 
 
-if TYPE_CHECKING:
-    PrecompDLoader = data.DataLoader[_Example, PrecompDsetBatch]
-
-
-@overload
-def get_precomp_loader(
-    data_path: str,
-    data_split: str,
-    vocab: "Vocabulary",
-    subword: Literal[False],
-    batch_size: int = 128,
-    shuffle: bool = True,
-    num_workers: int = 2,
-    load_img: bool = True,
-    img_dim: int = 2048,
-) -> "PrecompDLoader[_Example]":
-    ...
-
-
-@overload
-def get_precomp_loader(
-    data_path: str,
-    data_split: str,
-    vocab: "Vocabulary",
-    subword: Literal[True],
-    batch_size: int = 128,
-    shuffle: bool = True,
-    num_workers: int = 2,
-    load_img: bool = True,
-    img_dim: int = 2048,
-) -> "PrecompDLoader[_Example]":
-    ...
 
 
 def get_precomp_loader(
@@ -251,7 +264,7 @@ def get_precomp_loader(
     num_workers: int = 2,
     load_img: bool = True,
     img_dim: int = 2048,
-) -> "PrecompDLoader[_Example]":
+) -> DataLoader:
     dset: Union[PrecompWordDataset, PrecompSubwordDataset]
 
     if subword:
@@ -274,7 +287,7 @@ def get_train_loaders(
     batch_size: int,
     workers: int,
     subword: Union[Literal[True], Literal[False]],
-) -> Tuple["PrecompDLoader[_Example]", "PrecompDLoader[_Example]"]:
+) -> Tuple[DataLoader, DataLoader]:
     train_loader = get_precomp_loader(
         data_path=data_path,
         data_split="train",
