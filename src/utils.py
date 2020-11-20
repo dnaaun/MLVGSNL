@@ -17,7 +17,7 @@ class EmbeddingCombiner(nn.Module):
         super().__init__()
         self.embeddings = nn.ModuleList(embeddings)
 
-    def forward(self, input: Tensor) -> Tensor:
+    def forward(self, input: Tensor) -> Tensor: # type: ignore
         return torch.cat([e(input) for e in self.embeddings], dim=-1)
 
 
@@ -193,7 +193,7 @@ def generate_tree(
     pos: int,
     vocab: "Vocabulary",
     subword: bool,
-    pad_word="<pad>",
+    pad_word: str="<pad>",
     pad_word_id: int = 0,
 ):
     if subword:
@@ -371,11 +371,11 @@ def prod(values: Sequence[_Num], default: int = 1) -> _Num:
     return reduce(lambda x, y: x * y, values)
 
 
-def clean_tree(sentence, remove_tag_set={"<start>", "<end>", "<pad>"}):
+def clean_tree(sentence: str, remove_tag_set={"<start>", "<end>", "<pad>"}) -> str:
     for tag in remove_tag_set:
         sentence = sentence.replace(tag, " ")
     items = sentence.split()
-    stack = list()
+    stack: List[str] = list()
     for item in items:
         if item != ")":
             stack.append(item)

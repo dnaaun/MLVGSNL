@@ -1,10 +1,11 @@
 from typing import Collection, Any, List, Tuple, TypeVar, NewType, TypedDict
 from torch import Tensor
+from pathlib import Path
 from argparse import Namespace, ArgumentParser
 import tqdm
 import logging
 import os
-import pickle
+import pickle as pkl
 import shutil
 import time
 
@@ -294,16 +295,15 @@ if __name__ == "__main__":
 
     vocab_filename = f"vocab{subword_suf}.pkl"
 
+    with open(Path(opt.data_path) / vocab_filename, "rb") as fb:
+        vocab: Vocabulary = pkl.load(fb)
+    opt.vocab_size = len(vocab)
+
     if opt.init_embeddings:
         opt.vocab_init_embeddings = os.path.join(
             opt.data_path, f"{vocab_filename}.{opt.init_embeddings_key}_embeddings.npy"
         )
-
     
-    vocab: Vocabulary = pickle.load(
-        open(os.path.join(opt.data_path, vocab_filename), "rb")
-    )
-    opt.vocab_size = len(vocab)
 
     # Load data loaders
     train_loader, val_loader = data.get_train_loaders(
@@ -313,6 +313,7 @@ if __name__ == "__main__":
         opt.workers,
         subword=opt.init_embeddings_type == "subword",
     )
+    opt.vocab_size = len(vocab)
 
     # construct the model
     model = VGNSL(opt)

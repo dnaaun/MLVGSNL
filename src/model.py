@@ -577,3 +577,4 @@ class VGNSL(object):
             del probs
             del cap_span_features
             del span_bounds
+            del loss

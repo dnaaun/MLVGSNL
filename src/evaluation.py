@@ -3,6 +3,7 @@ import pickle
 
 from typing import (
     TYPE_CHECKING,
+    List,
     Dict,
     Callable,
     Any,
@@ -26,7 +27,6 @@ from utils import generate_tree, clean_tree
 
 if TYPE_CHECKING:
     from train import CheckpointData
-    from data import PrecompDLoader, _Example
 
 
 class AverageMeter:
@@ -316,7 +316,7 @@ def t2i(
         return (r1, r5, r10, medr, meanr)
 
 
-def test_trees(model_path: str):
+def test_trees(model_path: str) -> Tuple[List[str], List[str]]:
     """ use the trained model to generate parse trees for text """
     # load model and options
     checkpoint: "CheckpointData" = torch.load(model_path, map_location="cpu")
@@ -349,7 +349,7 @@ def test_trees(model_path: str):
 
     cap_embs = None
     logged = False
-    trees = list()
+    trees: List[str] = list()
     for i, (images, captions, lengths, ids) in enumerate(data_loader):
         # make sure val logger is used
         model.logger = print  # type: ignore # TODO: This actually looks unsafe. But "if it aint broke, ..."
@@ -381,7 +381,7 @@ def test_trees(model_path: str):
                     cast(PrecompDsetBase, data_loader.dataset).subword,
                 )
             )
-        appended_trees = ["" for _ in range(len(ids))]
+        appended_trees: List[str] = ["" for _ in range(len(ids))]
         for j in range(len(ids)):
             appended_trees[ids[j] - min(ids)] = clean_tree(candidate_trees[j])
         trees.extend(appended_trees)
