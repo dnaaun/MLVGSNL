@@ -1,10 +1,10 @@
-from typing import TYPE_CHECKING, List, Dict, Any, cast, Tuple
+from typing import TYPE_CHECKING, List, Dict, Any, cast, Tuple, Callable, NamedTuple
 import numpy as np
 from argparse import Namespace
 from collections import OrderedDict
 
 import torch
-from torch import Tensor
+from torch import Tensor, IntTensor, FloatTensor
 import torch.backends.cudnn as cudnn
 import torch.cuda
 import torch.nn as nn
@@ -75,17 +75,43 @@ class EncoderImagePrecomp(nn.Module):
         super(EncoderImagePrecomp, self).load_state_dict(new_state)
 
 
+class TextEncOut(NamedTuple):
+    features: List[Tensor]
+    left_span_features: List[Tensor]
+    right_span_features: List[Tensor]
+    output_word_embeddings: Tensor
+    tree_indices: List[Tensor]
+    tree_probs: List[Tensor]
+    span_bounds: List[Tensor]
+
+
+class VGNSLOut(NamedTuple):
+    img_emb: Tensor
+    features: List[Tensor]
+    left_span_features: List[Tensor]
+    right_span_features: List[Tensor]
+    output_word_embeddings: Tensor
+    tree_indices: List[Tensor]
+    tree_probs: List[Tensor]
+    span_bounds: List[Tensor]
+
+
 class EncoderText(nn.Module):
     """ text encoder """
 
-    def __init__(self, opt: Namespace, vocab_size: int, semantics_dim: int) -> None:
+    def __init__(
+        self,
+        opt: Namespace,
+        vocab_size: int,
+        semantics_dim: int,
+        sem_embedding: Callable[[Tensor], Tensor],
+    ) -> None:
         super(EncoderText, self).__init__()
 
         self.vocab_size = vocab_size
         self.semantics_dim = semantics_dim
 
-        # (V, WordD) # This shape is "effectively". The actual impl is more complicated.
-        self.sem_embedding = make_embeddings(opt, self.vocab_size, self.semantics_dim)
+        self.sem_embedding = sem_embedding
 
         # (1, 2*WordD)
         self.syn_score = nn.Sequential(
@@ -93,10 +119,6 @@ class EncoderText(nn.Module):
             nn.ReLU(),
             nn.Linear(opt.syntax_score_hidden, 1, bias=False),
         )
-        # self.reset_weights()
-
-    def reset_weights(self) -> None:
-        self.sem_embedding.weight.data.uniform_(-0.1, 0.1)  # type: ignore
 
     def forward(
         self,
@@ -105,15 +127,7 @@ class EncoderText(nn.Module):
         # (B,)
         lengths: Tensor,
         volatile: bool = False,
-    ) -> Tuple[
-        List[Tensor],
-        List[Tensor],
-        List[Tensor],
-        Tensor,
-        List[Tensor],
-        List[Tensor],
-        List[Tensor],
-    ]:
+    ) -> TextEncOut:
         """sample a tree for each sentence:
 
         Args:
@@ -151,7 +165,9 @@ class EncoderText(nn.Module):
             sem_embeddings
             *
             # (B, L, 1)
-            sequence_mask(lengths, max_length=lengths.max()).unsqueeze(-1).float()
+            sequence_mask(lengths, max_length=cast(int, lengths.max().item()))
+            .unsqueeze(-1)
+            .float()
         )
 
         valid_bs = lengths.size(0)
@@ -266,18 +282,20 @@ class EncoderText(nn.Module):
                 right_bounds, right_bounds, this_spans[:, 1], *update_masks
             )
 
-        return (
-            features,
-            left_span_features,
-            right_span_features,
-            output_word_embeddings,
-            tree_indices,
-            tree_probs,
-            span_bounds,
+        return TextEncOut(
+            features=features,
+            left_span_features=left_span_features,
+            right_span_features=right_span_features,
+            output_word_embeddings=output_word_embeddings,
+            tree_indices=tree_indices,
+            tree_probs=tree_probs,
+            span_bounds=span_bounds,
         )
 
     @staticmethod
-    def update_with_mask(lv: Tensor, rv: Tensor, cv: Tensor, lm: Tensor, rm: Tensor, cm: Tensor):
+    def update_with_mask(
+        lv: Tensor, rv: Tensor, cv: Tensor, lm: Tensor, rm: Tensor, cm: Tensor
+    ) -> Tensor:
         if lv.dim() > lm.dim():
             lm = lm.unsqueeze(2)
             rm = rm.unsqueeze(2)
@@ -298,7 +316,7 @@ class ContrastiveReward(nn.Module):
         self.margin = margin
         self.sim = cosine_sim
 
-    def forward(self, im, s):
+    def forward(self, im: Tensor, s: Tensor) -> Tensor:
         """ return the reward """
         # compute image-sentence score matrix
         scores = self.sim(im, s)
@@ -362,7 +380,11 @@ class VGNSL(object):
     def __init__(self, opt: Namespace):
         self.grad_clip = opt.grad_clip
         self.img_enc = EncoderImagePrecomp(opt.img_dim, opt.embed_size, opt.no_imgnorm)
-        self.txt_enc = EncoderText(opt, opt.vocab_size, opt.word_dim)
+
+        # (V, WordD) # This shape is "effectively". The actual impl is more complicated.
+        sem_embedding = make_embeddings(opt, opt.vocab_size, opt.word_dim)
+
+        self.txt_enc = EncoderText(opt, opt.vocab_size, opt.word_dim, sem_embedding)
 
         if torch.cuda.is_available():
             self.img_enc.cuda()
@@ -416,7 +438,7 @@ class VGNSL(object):
         captions: Tensor,  # (B, L) or # (B, L, S)
         lengths: Tensor,  # (B,)
         volatile: bool = False,
-    ):
+    ) -> VGNSLOut:
         """Compute the image and caption embeddings"""
         # Set mini-batch dataset
         if torch.cuda.is_available():
@@ -426,44 +448,37 @@ class VGNSL(object):
             # (B, EmbedD)
             img_emb = self.img_enc(images)
 
-            txt_outputs: Tuple[
-                List[Tensor],
-                List[Tensor],
-                List[Tensor],
-                Tensor,
-                List[Tensor],
-                List[Tensor],
-                List[Tensor],
-            ]
             txt_outputs = self.txt_enc(captions, lengths, volatile)
-        return (img_emb,) + txt_outputs
+        return VGNSLOut(img_emb, *txt_outputs)
 
     def forward_reward(
         self,
-        base_img_emb,
-        cap_span_features,
-        left_span_features,
-        right_span_features,
-        word_embs,
-        lengths,
-        span_bounds,
-        **kwargs
-    ):
+        base_img_emb: Tensor,
+        cap_span_features: List[Tensor],
+        left_span_features: List[Tensor],
+        right_span_features: List[Tensor],
+        word_embs: Tensor,
+        lengths: IntTensor,
+        span_bounds: List[Tensor],
+        **kwargs: Any,
+    ) -> Tuple[Tensor, Tensor]:
         """Compute the loss given pairs of image and caption embeddings"""
-        reward_matrix = torch.zeros(base_img_emb.size(0), lengths.max(0)[0] - 1).float()
+        reward_matrix = torch.zeros(
+            base_img_emb.size(0), (lengths.max(0)[0]).item() - 1
+        ).float()
         left_reg_matrix = torch.zeros(
-            base_img_emb.size(0), lengths.max(0)[0] - 1
+            base_img_emb.size(0), lengths.max(0)[0].item() - 1
         ).float()
         right_reg_matrix = torch.zeros(
-            base_img_emb.size(0), lengths.max(0)[0] - 1
+            base_img_emb.size(0), lengths.max(0)[0].item() - 1
         ).float()
         if torch.cuda.is_available():
             reward_matrix = reward_matrix.cuda()
             right_reg_matrix = right_reg_matrix.cuda()
             left_reg_matrix = left_reg_matrix.cuda()
 
-        matching_loss = 0
-        for i in range(lengths.max(0)[0] - 1):
+        matching_loss = cast(Tensor, 0)
+        for i in range(lengths.max(0)[0].item() - 1):
             curr_imgs = list()
             curr_caps = list()
             curr_left_caps = list()
@@ -473,13 +488,13 @@ class VGNSL(object):
                 if i < lengths[j] - 1:
                     curr_imgs.append(base_img_emb[j].reshape(1, -1))
                     curr_caps.append(
-                        cap_span_features[lengths[j] - 2 - i][j].reshape(1, -1)
+                        cap_span_features[lengths[j] - 2 - i][j].reshape(1, -1) #type: ignore[call-overload]
                     )
                     curr_left_caps.append(
-                        left_span_features[lengths[j] - 2 - i][j].reshape(1, -1)
+                        left_span_features[lengths[j] - 2 - i][j].reshape(1, -1) #type: ignore[call-overload]
                     )
                     curr_right_caps.append(
-                        right_span_features[lengths[j] - 2 - i][j].reshape(1, -1)
+                        right_span_features[lengths[j] - 2 - i][j].reshape(1, -1) #type: ignore[call-overload]
                     )
                     indices.append(j)
 
@@ -511,7 +526,7 @@ class VGNSL(object):
         lengths: List[int],
         ids: List[int] = None,
         *,
-        epoch: int = None
+        epoch: int,
     ) -> None:
         """ one training step given images and captions """
         self.Eiters += 1
@@ -547,11 +562,13 @@ class VGNSL(object):
             tensor_lengths,
             span_bounds,
         )
-        probs = (
+        concat_probs = (
             torch.cat(probs, dim=0).reshape(-1, tensor_lengths.size(0)).transpose(0, 1)
         )
-        masks = sequence_mask(tensor_lengths - 1, cast(int, (tensor_lengths.max(0)[0] - 1))).float()
-        rl_loss = torch.sum(-masks * torch.log(probs) * cum_reward.detach())
+        masks = sequence_mask(
+            tensor_lengths - 1, cast(int, (tensor_lengths.max(0)[0] - 1))
+        ).float()
+        rl_loss = torch.sum(-masks * torch.log(concat_probs) * cum_reward.detach())
 
         loss = rl_loss + matching_loss * self.vse_loss_alpha
         loss = loss / cum_reward.shape[0]
@@ -574,7 +591,7 @@ class VGNSL(object):
         if epoch > 0:
             del cum_reward
             del tree_indices
-            del probs
+            del concat_probs
             del cap_span_features
             del span_bounds
             del loss

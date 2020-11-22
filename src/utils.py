@@ -6,7 +6,7 @@ import torch
 from torch import Tensor
 import numpy as np
 import torch.nn as nn
-from typing import Sequence, Tuple, Union, List, TYPE_CHECKING, cast, TypeVar, Optional
+from typing import Sequence, Tuple, Union, List, TYPE_CHECKING, cast, TypeVar, Optional, SupportsInt
 
 if TYPE_CHECKING:
     from vocab import Vocabulary
@@ -184,7 +184,7 @@ def cosine_sim(im: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
 
 
 def l2norm(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
-    return x / x.norm(2, dim=dim, keepdim=True).clamp(min=1e-6)  # type: ignore[no-untyped-call,no-any-return]
+    return x / x.norm(2, dim=dim, keepdim=True).clamp(min=1e-6)
 
 
 def generate_tree(
@@ -195,7 +195,7 @@ def generate_tree(
     subword: bool,
     pad_word: str="<pad>",
     pad_word_id: int = 0,
-):
+) -> str:
     if subword:
 
         def get_word_func(__word_ids: Tensor) -> Optional[str]:
@@ -238,7 +238,7 @@ def generate_tree(
 def sequence_mask(
     # (B,)
     sequence_length: Tensor,
-    max_length: int = None,
+    max_length: int,
 ) -> Tensor:
     """Returns a 2D binary tensor that can be used for masking padding positions."""
     if max_length is None:
@@ -246,7 +246,7 @@ def sequence_mask(
     batch_size = sequence_length.size(0)
 
     # (L,)
-    seq_range = torch.arange(0, max_length).long()  # type: ignore # Using a 0dim tensor
+    seq_range = torch.arange(0, max_length).long()
 
     # (B, L)
     seq_range_expand = seq_range.unsqueeze(0).expand(batch_size, max_length)

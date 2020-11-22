@@ -284,9 +284,7 @@ if __name__ == "__main__":
     logger.propagate = False
 
     subword_suf = ""
-    if (opt.init_embeddings_key == "bert") != (
-        opt.init_embeddings_type == "subword"
-    ):
+    if (opt.init_embeddings_key == "bert") != (opt.init_embeddings_type == "subword"):
         raise Exception(
             " --init_embeddings_key bert (must) go along -- --init_embeddings_type subword."
         )
@@ -303,7 +301,6 @@ if __name__ == "__main__":
         opt.vocab_init_embeddings = os.path.join(
             opt.data_path, f"{vocab_filename}.{opt.init_embeddings_key}_embeddings.npy"
         )
-    
 
     # Load data loaders
     train_loader, val_loader = data.get_train_loaders(
@@ -337,13 +334,11 @@ if __name__ == "__main__":
         best_rsum = max(rsum, best_rsum)
         save_checkpoint(
             CheckpointData(
-                {
-                    "epoch": epoch + 1,
-                    "model": model.state_dict(),
-                    "best_rsum": best_rsum,
-                    "opt": opt,
-                    "Eiters": model.Eiters,
-                }
+                epoch=epoch + 1,
+                model=model.state_dict(),
+                best_rsum=best_rsum,
+                opt=opt,
+                Eiters=model.Eiters,
             ),
             is_best,
             epoch,

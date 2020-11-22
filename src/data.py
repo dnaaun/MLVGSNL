@@ -1,7 +1,11 @@
 from random import Random
+import pickle as pkl
 import math
 from typing import (
+    Sized,
     NamedTuple,
+    Iterator,
+    Iterable,
     Any,
     Iterator,
     cast,
@@ -18,7 +22,7 @@ from typing import (
     overload,
     Union,
 )
-from typing_extensions import Literal
+from typing_extensions import Literal, Protocol
 from pathlib import Path
 import nltk  # type: ignore
 from itertools import chain, accumulate
@@ -31,6 +35,7 @@ import torch
 from torch import Tensor
 import torch.utils.data as data
 from torch.utils.data import DataLoader, Dataset, Sampler
+from coll_utils import Ordering
 
 if TYPE_CHECKING:
     from vocab import Vocabulary
@@ -38,22 +43,75 @@ if TYPE_CHECKING:
 
 _WordExample = Tuple[Tensor, Tensor, int, int]
 _SubwordExample = Tuple[Tensor, List[List[int]], int, int]
-_Example = TypeVar("_Example", _WordExample, _SubwordExample)
+_Example = TypeVar("_Example", _WordExample, _SubwordExample, covariant=True)
 
 PrecompDsetBatch = Tuple[Tensor, Tensor, List[int], List[int]]
 
-_T = TypeVar("_T")
+_Tco = TypeVar("_Tco", covariant=True)
 
 
-class MyDset(Sequence[_T]):
-    @abc.abstractstaticmethod
-    def collate_fn(exs: List[_T]) -> object:  # Lower bound!
+class SizedIndexedIterable(Sized, Iterable[_Tco], Protocol):
+    def __getitem__(self, __idx: int) -> _Tco:
+        ...
+
+
+class MyDset(Dataset, Generic[_Tco]):
+    @abc.abstractmethod
+    def collate_fn(self, exs: List[_Tco]) -> object:
         pass
+
+    @abc.abstractmethod
+    def __getitem__(self, __i: int) -> _Tco:
+        pass
+
+    @abc.abstractmethod
+    def __len__(self) -> int:
+        pass
+
+    def __iter__(self) -> Iterator[_Tco]:
+        for i in range(len(self)):
+            yield self[i]
+
+
+_S = TypeVar("_S", bound="ConcatSequence")
+
+
+class ConcatSequence(Generic[_Tco]):
+
+    seqs: SizedIndexedIterable[SizedIndexedIterable[_Tco]]
+
+    def __init__(self, seqs: SizedIndexedIterable[SizedIndexedIterable[_Tco]]) -> None:
+        self.seqs = seqs
+        self._len = sum(map(len, seqs))
+
+    def __len__(self) -> int:
+        return self._len
+
+    def __iter__(self) -> Iterator[_Tco]:
+        for i in range(len(self)):
+            yield self[i]
+
+    def get_detailed_idx(self, idx: int) -> Tuple[int, int]:
+        if idx < 0:
+            idx += len(self)
+
+        for seq_num, seq in enumerate(self.seqs):
+            if idx >= len(seq):
+                idx -= len(seq)
+            else:
+                return (seq_num, idx)
+        raise IndexError(
+            f"{idx} is beyond the total len of this SeqOfSeqs (which is {len(self)}."
+        )
+
+    def __getitem__(self: _S, idx: int) -> _Tco:
+        seq_num, idx = self.get_detailed_idx(idx)
+        return self.seqs[seq_num][idx]
 
 
 class PrecompDsetBase(MyDset[_Example]):
-    """Handles image related dataset loading. Captions are handled by subclasses. Not meant
-    to be instantiated directly.
+    """Handles image related dataset loading. Captions are handled by subclasses. Not
+    meant to be instantiated directly.
     """
 
     captions: List[List[Any]]
@@ -77,8 +135,8 @@ class PrecompDsetBase(MyDset[_Example]):
 
         if generic_caps_per_img_fpath.exists() == split_caps_per_img_fpath.exists():
             raise Exception(
-                f"Exactly one of {str(split_caps_per_img_fpath)} or {str(generic_caps_per_img_fpath)}"
-                " must exist."
+                f"Exactly one of {str(split_caps_per_img_fpath)} or"
+                f" {str(generic_caps_per_img_fpath)} must exist."
             )
         elif generic_caps_per_img_fpath.exists():
             split_caps_per_img_fpath = generic_caps_per_img_fpath
@@ -90,6 +148,7 @@ class PrecompDsetBase(MyDset[_Example]):
         while str_caps_per_img[-1] == "":
             str_caps_per_img.pop()
 
+        self.load_img = load_img
         # image features
         # (DsetL, ImgD)
         if load_img:
@@ -105,16 +164,18 @@ class PrecompDsetBase(MyDset[_Example]):
             else:
                 if not len(str_caps_per_img) == len(self.images):
                     raise Exception(
-                        f"caps_per_img file length (which is {len(str_caps_per_img)} is neither one, nor equal to the "
-                        f"number of images(which is {len(self.images)}."
+                        f"caps_per_img file length (which is {len(str_caps_per_img)} is"
+                        f"neither one, nor equal to the "
+                        "number of images(which is {len(self.images)}."
                     )
                 caps_per_img = list(map(int, str_caps_per_img))
 
-            if not (num_exp_caps := sum(caps_per_img)) == len(self.captions):
+            num_exp_caps = sum(caps_per_img)
+            if not num_exp_caps == len(self.captions):
                 raise Exception(
-                    f"THe total number of captions ({len(self.captions)}) is not equal to the value"
-                    " expected from caps_per_img.txt and the image features (that number is "
-                    f" {num_exp_caps})"
+                    f"THe total number of captions ({len(self.captions)}) is not equal "
+                    "to the value expected from caps_per_img.txt and the image features"
+                    f" (that number is {num_exp_caps})"
                 )
 
         else:
@@ -138,8 +199,8 @@ class PrecompDsetBase(MyDset[_Example]):
     def prepare_captions(self) -> None:
         pass
 
-    @abc.abstractstaticmethod
-    def collate_fn(exs: List[_Example]) -> PrecompDsetBatch:  # type: ignore
+    @abc.abstractmethod
+    def collate_fn(self, exs: List[_Example]) -> PrecompDsetBatch:
         pass
 
     def __len__(self) -> int:
@@ -166,7 +227,7 @@ class PrecompSubwordDataset(PrecompDsetBase[_SubwordExample]):
         for cap in self.captions[:5]:
             print(f"\t{cap}")
 
-    def __getitem__(self, index: int) -> _SubwordExample:
+    def __getitem__(self, index: int) -> _SubwordExample:  # type: ignore[override]
         # image
         img_id = self.cap_idx_to_img_idx[index]
 
@@ -184,8 +245,8 @@ class PrecompSubwordDataset(PrecompDsetBase[_SubwordExample]):
     def collate_fn(exs: List[_SubwordExample]) -> PrecompDsetBatch:
         """ build mini-batch tensors from a list of (image, caption) tuples """
         # sort a data list by caption length
-        # I don't know why though, apart from getting the max seq length. But that is doable
-        # without sorting easily. Going by "If it ain't broke, don't fix it".
+        # I don't know why though, apart from getting the max seq length. But that is
+        # doable without sorting easily. Going by "If it ain't broke, don't fix it".
         exs.sort(key=lambda x: len(x[1]), reverse=True)
 
         images: List[Tensor]
@@ -231,12 +292,13 @@ class PrecompWordDataset(PrecompDsetBase[_WordExample]):
                 words = line.strip().lower().split()
                 self.captions.append(words)
         print(
-            f"Read {len(self.captions)} captions from {self.data_split}_caps.txt. For example: "
+            f"Read {len(self.captions)} captions from {self.data_split}_caps.txt. For "
+            "example: "
         )
         for cap in self.captions[:5]:
             print(f"\t{cap}")
 
-    def __getitem__(self, index: int) -> _WordExample:
+    def __getitem__(self, index: int) -> _WordExample:  # type: ignore[override]
         # image
         img_id = self.cap_idx_to_img_idx[index]
 
@@ -272,32 +334,10 @@ class PrecompWordDataset(PrecompDsetBase[_WordExample]):
         return stacked_images, targets, lengths, ids
 
 
-class ConcatSeq(Sequence[_T]):
-
-    seqs: Sequence[Sequence[_T]]
-
-    def __init__(self, seqs: Sequence[Sequence[_T]]) -> None:
-        self.seqs = seqs
-        self._len = sum(map(len, seqs))
-
-    def __len__(self) -> int:
-        return self._len
-
-    def __getitem__(self, idx: int) -> _T:
-        for seq in self.seqs:
-            if idx >= len(seq):
-                idx -= len(seq)
-            else:
-                return seq[idx]
-        raise IndexError(
-            f"{idx} is beyond the total len of this SeqOfSeqs (which is {len(self)}."
-        )
-
-
 class ConcatDset(MyDset[Tuple[str, _Example]]):
 
-    seq_of_dsets: ConcatSeq[Tuple[str, _Example]]
-    langs: Dict[str, int]
+    seq_of_dsets: ConcatSequence[_Example]
+    lang_ordering: Ordering[str]
     subword: bool
 
     def __init__(
@@ -312,37 +352,43 @@ class ConcatDset(MyDset[Tuple[str, _Example]]):
         dir_ = Path(data_path)
 
         if subword:
-            dset_class: Type[PrecompDsetBase[_Example]] = PrecompSubwordDataset
+            dset_class: Type[PrecompDsetBase] = PrecompSubwordDataset
         else:
             dset_class = PrecompWordDataset
 
-        self.lang2idx = {}
+        langs = []
         dsets: List[PrecompDsetBase[_Example]] = []
         for subdir in dir_.iterdir():
-            lang = subdir.name
-            self.lang2idx[lang] = len(self.lang2idx)
             if "vocab" in subdir.name:
                 continue
-            dsets.append(dset_class(data_path, data_split, vocab))
-        self.seq_of_dsets = ConcatSeq(dsets)
+            langs.append(subdir.name)
+            dsets.append(dset_class(str(subdir), data_split, vocab))
+
+        self.seq_of_dsets = ConcatSequence(tuple(dsets))
+        self.lang_ordering = Ordering(langs)
 
     def __getitem__(self, idx: int) -> Tuple[str, _Example]:
-        return self.seq_of_dsets[idx]
+        lang_idx, idx = self.seq_of_dsets.get_detailed_idx(idx)
+        lang = self.lang_ordering[lang_idx]
+        return lang, self.seq_of_dsets.seqs[lang_idx][idx]
 
     def __len__(self) -> int:
-        return sum([len(d) for d in self.seq_of_dsets])
+        return sum(len(d) for d in self.seq_of_dsets.seqs)
 
-    def collate_fn(  # type: ignore
+    def collate_fn(
         self, exs: List[Tuple[str, _Example]]
     ) -> Tuple[str, PrecompDsetBatch]:
         langs, data = cast(Tuple[Tuple[str, ...], Tuple[_Example, ...]], zip(*exs))
         if len(set(langs)) != 1:
             raise RuntimeError(
-                f"The sampler picked examples from different lanugages in the same batch."
+                f"The sampler picked examples from different lanugages in the same"
+                " batch."
             )
         lang = langs[0]
-
-        dset_collate_fn = self.seq_of_dsets[self.lang2idx[lang]].collate_fn  # type: ignore
+        lang_idx = self.lang_ordering.indices[lang]
+        dset_collate_fn = cast(
+            PrecompDsetBase[_Example], self.seq_of_dsets.seqs[lang_idx]
+        ).collate_fn
         batch = dset_collate_fn(list(data))
 
         return (lang, batch)
@@ -355,6 +401,8 @@ class DontMixBatchSampler(Sampler):
         batches_in_each = [
             math.ceil(len(dset) / batch_size) for dset in data_source.seq_of_dsets.seqs
         ]
+        self._len = sum(batches_in_each)
+
         dset_ids_and_batch_ids = [
             (dset_id, batch_id)
             for dset_id, num_batches in enumerate(batches_in_each)
@@ -387,58 +435,21 @@ class DontMixBatchSampler(Sampler):
                 rnd.shuffle(batch_indices)
             self.indices.append(batch_indices)
 
-    def __iter__(self) -> Iterator[_T]:
+    def __iter__(self) -> Iterator[List[int]]:
         return iter(self.indices)
+
+    def __len__(self) -> int:
+        return self._len
 
 
 def test_seq_of_seqs() -> None:
     a = list(range(1, 5))
     b = list(range(5, 18))
-    conc_seq = ConcatSeq([a, b])
+    conc_seq = ConcatSequence([a, b])
     assert set(conc_seq) == set(a) | set(b)
 
     for idx, item in enumerate(chain(a, b)):
         assert conc_seq[idx] == item
-
-
-def test_dont_mix_sampler() -> None:
-    class Src(MyDset[_T]):
-        def __init__(self, dsets: List[List[_T]]):
-            self.seq_of_dsets = ConcatSeq(dsets)
-
-        def __getitem__(self, idx: int) -> _T:
-            return self.seq_of_dsets[idx]
-
-        def __len__(self) -> int:
-            return len(self.seq_of_dsets)
-
-        collate_fn = None  # type: ignore
-
-    src = Src([list(range(5)), list(range(5, 18))])
-
-    all_ = set(src)
-    for bsize in [1, 3, 4, 6]:
-        for shuffle in (True, False):
-            sampler = DontMixBatchSampler(
-                cast(ConcatDset[Any], src), batch_size=bsize, shuffle=shuffle
-            )
-
-            total = set()
-            print(f"shuffle={shuffle}, batchsize=", bsize, ":", end="")
-            for batch in sampler:
-                assert len(batch) > 0
-                assert set(batch) - all_ == set()
-
-                if batch[0] >= 5:
-                    assert all(i >= 5 for i in batch)
-                else:
-                    assert all(i < 5 for i in batch)
-
-                total.update(batch)
-                print(batch, end=", ")
-
-            assert len(total) == len(src)
-            print("")
 
 
 def get_precomp_loader(
@@ -452,12 +463,14 @@ def get_precomp_loader(
     load_img: bool = True,
     img_dim: int = 2048,
 ) -> DataLoader:
-    dset: Union[PrecompWordDataset, PrecompSubwordDataset]
+    dset_class: Union[Type[PrecompWordDataset], Type[PrecompSubwordDataset]]
 
     if subword:
-        dset = PrecompSubwordDataset(data_path, data_split, vocab, load_img, img_dim)
+        dset_class = PrecompSubwordDataset
     else:
-        dset = PrecompWordDataset(data_path, data_split, vocab, load_img, img_dim)
+        dset_class = PrecompWordDataset
+
+    dset = dset_class(data_path, data_split, vocab, load_img, img_dim)
     data_loader = DataLoader(
         dataset=dset,
         batch_size=batch_size,
@@ -519,3 +532,68 @@ def get_eval_loader(
         img_dim=img_dim,
     )
     return eval_loader
+
+
+##################### TESTS #################################
+
+
+def test_dont_mix_sampler() -> None:
+    class Src(MyDset[_Tco]):
+        def __init__(self, dsets: List[List[_Tco]]):
+            self.seq_of_dsets = ConcatSequence(dsets)
+
+        def __getitem__(self, idx: int) -> _Tco:
+            return self.seq_of_dsets[idx]
+
+        def __len__(self) -> int:
+            return len(self.seq_of_dsets)
+
+        collate_fn = None  # type: ignore
+
+    src = Src([list(range(5)), list(range(5, 18))])
+
+    all_ = set(src)
+    for bsize in [1, 3, 4, 6]:
+        for shuffle in (True, False):
+            sampler = DontMixBatchSampler(
+                cast(ConcatDset[Any], src), batch_size=bsize, shuffle=shuffle
+            )
+
+            total = set()
+            print(f"shuffle={shuffle}, batchsize=", bsize, ":", end="")
+            for batch in sampler:
+                assert len(batch) > 0
+                assert set(batch) - all_ == set()
+
+                if batch[0] >= 5:
+                    assert all(i >= 5 for i in batch)
+                else:
+                    assert all(i < 5 for i in batch)
+
+                total.update(batch)
+                print(batch, end=", ")
+
+            assert len(total) == len(src)
+            print("")
+
+
+def test_concat_dset() -> None:
+    import pytest
+
+    data_dir = Path(__file__).parent.parent / "concat_dset_data"
+    if not data_dir.exists():
+        pytest.skip(f"Skipping test as {str(data_dir)} doesn't exist.")
+
+    with open(data_dir / "vocab_subword.pkl", "rb") as fb:
+        vocab = pkl.load(fb)
+    dset = ConcatDset(
+        str(data_dir), data_split="train", vocab=vocab, subword=True, load_img=True
+    )
+    batch_sampler = DontMixBatchSampler(dset, batch_size=128)
+    dloader = DataLoader(
+        dset,
+        batch_sampler=batch_sampler,
+        collate_fn = dset.collate_fn
+    )
+    item = next(iter(dloader))
+    breakpoint()

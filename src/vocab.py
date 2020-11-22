@@ -1,9 +1,5 @@
 # Create a vocabulary wrapper
 from typing import Dict
-import nltk  # type: ignore
-import pickle
-from collections import Counter
-from pycocotools.coco import COCO  # type: ignore
 
 
 class Vocabulary(object):
