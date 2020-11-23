@@ -3,23 +3,18 @@ import pickle as pkl
 import math
 from typing import (
     Sized,
-    NamedTuple,
     Iterator,
     Iterable,
     Any,
     Iterator,
     cast,
-    Dict,
     Type,
     TYPE_CHECKING,
     Tuple,
-    Sequence,
     List,
-    NewType,
     List,
     TypeVar,
     Generic,
-    overload,
     Union,
 )
 from typing_extensions import Literal, Protocol
@@ -29,11 +24,9 @@ from itertools import chain, accumulate
 import abc
 import numpy as np
 import os
-from collections import abc as coll_abc
 
 import torch
 from torch import Tensor
-import torch.utils.data as data
 from torch.utils.data import DataLoader, Dataset, Sampler
 from coll_utils import Ordering
 
@@ -227,7 +220,7 @@ class PrecompSubwordDataset(PrecompDsetBase[_SubwordExample]):
         for cap in self.captions[:5]:
             print(f"\t{cap}")
 
-    def __getitem__(self, index: int) -> _SubwordExample:  # type: ignore[override]
+    def __getitem__(self, index: int) -> _SubwordExample:
         # image
         img_id = self.cap_idx_to_img_idx[index]
 
@@ -298,7 +291,7 @@ class PrecompWordDataset(PrecompDsetBase[_WordExample]):
         for cap in self.captions[:5]:
             print(f"\t{cap}")
 
-    def __getitem__(self, index: int) -> _WordExample:  # type: ignore[override]
+    def __getitem__(self, index: int) -> _WordExample:
         # image
         img_id = self.cap_idx_to_img_idx[index]
 

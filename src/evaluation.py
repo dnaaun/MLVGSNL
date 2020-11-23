@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import pickle
 
 from typing import (
@@ -124,7 +125,7 @@ def encode_data(
             logged = True
             if stage == "dev":
                 sample_num = 5
-            for j in range(sample_num):  # type: ignore # FIXME:
+            for j in range(sample_num):
                 logging(
                     generate_tree(
                         captions,
@@ -142,8 +143,8 @@ def encode_data(
 
         # initialize the numpy arrays given the size of the embeddings
         if img_embs is None:
-            img_embs = np.zeros((len(data_loader.dataset), img_emb.size(1)))  # type: ignore
-            cap_embs = np.zeros((len(data_loader.dataset), cap_emb.size(1)))  # type: ignore
+            img_embs = np.zeros((len(data_loader.dataset), img_emb.size(1)))
+            cap_embs = np.zeros((len(data_loader.dataset), cap_emb.size(1)))
 
         # preserve the embeddings by copying from gpu and converting to numpy
         img_embs[ids] = img_emb.data.cpu().numpy().copy()
@@ -316,7 +317,9 @@ def t2i(
         return (r1, r5, r10, medr, meanr)
 
 
-def test_trees(model_path: str) -> Tuple[List[str], List[str]]:
+def test_trees(
+    model_path: str, test_caps_fpath: Path = None, test_ground_truth_fpath: Path = None
+) -> Tuple[List[str], List[str]]:
     """ use the trained model to generate parse trees for text """
     # load model and options
     checkpoint: "CheckpointData" = torch.load(model_path, map_location="cpu")
@@ -335,10 +338,10 @@ def test_trees(model_path: str) -> Tuple[List[str], List[str]]:
     # load model state
     model.load_state_dict(checkpoint["model"])
 
-    print("Loading dataset")
+    print("Loading dataset..")
     data_loader = get_eval_loader(
-        data_path=opt.data_path,
-        split_name="test",
+        caps_fpath=caps_fpath,
+        img_fpath=img_fpath,
         vocab=vocab,
         batch_size=opt.batch_size,
         workers=opt.workers,

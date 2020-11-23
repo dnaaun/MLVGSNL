@@ -8,7 +8,7 @@ from evaluation import test_trees
 
 def extract_spans(tree: str) -> List[Tuple[int, int]]:
     answer: List[Tuple[int, int]] = list()
-    stack: List[Union[Literal["("], Tuple[int, int]]] = list()
+    stack: List[Union[str, Tuple[int, int]]] = list()
     items = tree.split()
     curr_index = 0
     for item in items:
@@ -24,9 +24,7 @@ def extract_spans(tree: str) -> List[Tuple[int, int]]:
             assert isinstance(left_margin, int)
             assert isinstance(right_margin, int)
             # Type annotation neeeded for pyright
-            to_add: List[Union[Literal["("], Tuple[int, int]]] = [
-                (left_margin, right_margin)
-            ]
+            to_add: List[Union[str, Tuple[int, int]]] = [(left_margin, right_margin)]
             stack = stack[:pos] + to_add
             answer.append((left_margin, right_margin))
         elif item == "(":
@@ -39,7 +37,7 @@ def extract_spans(tree: str) -> List[Tuple[int, int]]:
 
 def extract_statistics(
     gold_tree_spans: List[Tuple[int, int]], produced_tree_spans: List[Tuple[int, int]]
-):
+) -> Tuple[float, int, float, int]:
     set_gold_tree_spans = set(gold_tree_spans)
     set_produced_tree_spans = set(produced_tree_spans)
     precision_cnt = sum(
@@ -63,11 +61,13 @@ def extract_statistics(
     return precision_cnt, precision_denom, recall_cnt, recall_denom
 
 
-def f1_score(produced_trees: List[str], gold_trees: List[str]):
+def f1_score(
+    produced_trees: List[str], gold_trees: List[str]
+) -> Tuple[float, float, float]:
     gold_trees_spans = list(map(lambda tree: extract_spans(tree), gold_trees))
     produced_trees_spans = list(map(lambda tree: extract_spans(tree), produced_trees))
     assert len(produced_trees_spans) == len(gold_trees_spans)
-    precision_cnt, precision_denom, recall_cnt, recall_denom = 0, 0, 0, 0
+    precision_cnt, precision_denom, recall_cnt, recall_denom = 0.0, 0, 0.0, 0
     for i, item in enumerate(produced_trees_spans):
         pc, pd, rc, rd = extract_statistics(gold_trees_spans[i], item)
         precision_cnt += pc
@@ -84,6 +84,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--candidate", type=str, required=True, help="model path to evaluate"
+    )
+    parser.add_argument(
+        "test-files",
+        type=str,
+        nargs="+",
+        help="additional files to test on."
+        " If this option is provided, the test file in the data_path of this model"
+        " will not be considered.",
     )
     args = parser.parse_args()
 

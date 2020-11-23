@@ -3,10 +3,23 @@ from argparse import Namespace
 from functools import reduce
 
 import torch
-from torch import Tensor
+from torch import Tensor, FloatTensor, IntTensor
 import numpy as np
 import torch.nn as nn
-from typing import Sequence, Tuple, Union, List, TYPE_CHECKING, cast, TypeVar, Optional, SupportsInt
+from typing import (
+    FrozenSet,
+    Callable,
+    Sequence,
+    Dict,
+    Tuple,
+    Union,
+    List,
+    TYPE_CHECKING,
+    cast,
+    TypeVar,
+    Optional,
+    SupportsInt,
+)
 
 if TYPE_CHECKING:
     from vocab import Vocabulary
@@ -17,7 +30,7 @@ class EmbeddingCombiner(nn.Module):
         super().__init__()
         self.embeddings = nn.ModuleList(embeddings)
 
-    def forward(self, input: Tensor) -> Tensor: # type: ignore
+    def forward(self, input: Tensor) -> Tensor:
         return torch.cat([e(input) for e in self.embeddings], dim=-1)
 
 
@@ -81,14 +94,14 @@ class SubwordEmbedder(nn.Module):
         return pooled
 
 
-def tree2list(tokens):
-    tree = list()
+def tree2list(tokens):  # type: ignore
+    tree = list()  # type: ignore
     list_stack = list()
     list_stack.append(tree)
     stack_top = tree
     for token in tokens:
         if token == "(":
-            new_span = []
+            new_span = []  # type: ignore
             stack_top.append(new_span)
             list_stack.append(new_span)
             stack_top = new_span
@@ -101,16 +114,16 @@ def tree2list(tokens):
     return tree
 
 
-def treelist2dict(tree, d):
-    if type(tree) is str:
+def treelist2dict(tree: Union[str, List[str]], d: Dict[str, List[str]]) -> str:
+    if isinstance(tree, str):
         return tree
     span_reprs = [treelist2dict(s, d) for s in tree]
     d[" ".join(span_reprs)] = tree
     return " ".join(span_reprs)
 
 
-def tree2str(tree):
-    if type(tree) is str:
+def tree2str(tree: Union[str, List[str]]) -> str:
+    if isinstance(tree, str):
         return tree
     items = [tree2str(item) for item in tree]
     return "( " + " ".join(items) + " )"
@@ -121,7 +134,7 @@ def make_embeddings(opt: Namespace, vocab_size: int, dim: int) -> nn.Module:
     if hasattr(opt, "vocab_init_embeddings"):
         init_embeddings = torch.from_numpy(np.load(opt.vocab_init_embeddings))
 
-    emb = None
+    emb: Optional[Callable[[Tensor], Tensor]] = None
     if opt.init_embeddings_type in ("override", "partial"):
         emb = nn.Embedding(vocab_size, dim, padding_idx=0)
         if init_embeddings is not None:
@@ -189,11 +202,11 @@ def l2norm(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
 
 def generate_tree(
     captions: Tensor,
-    tree_indices: Tensor,
+    tree_indices: List[Tensor],
     pos: int,
     vocab: "Vocabulary",
     subword: bool,
-    pad_word: str="<pad>",
+    pad_word: str = "<pad>",
     pad_word_id: int = 0,
 ) -> str:
     if subword:
@@ -218,10 +231,9 @@ def generate_tree(
     words = []
     for word_ids in captions[pos]:
         word = get_word_func(word_ids)
-        if word is None:
-            continue
-        word = {"(": "-LBR-", ")": "-RBR-"}.get(word, word)
-        words.append(word)
+        if word is not None:
+            word = {"(": "-LBR-", ")": "-RBR-"}.get(word, word)
+            words.append(word)
 
     idx = 0
     while len(words) > 1:
@@ -232,6 +244,8 @@ def generate_tree(
             + words[p + 2 :]
         )
         idx += 1
+
+    assert words[0] is not None  # mypy shouldn't need this actually
     return words[0]
 
 
@@ -308,12 +322,15 @@ def index_mask(
     return seq_range_expand == indices_expand
 
 
-def index_range_ellipsis(x, a, b, dim=1, padding_zero=True):
+def index_range_ellipsis(
+    x: Tensor, a: IntTensor, b: IntTensor, dim: int = 1, padding_zero: bool = True
+) -> Tensor:
     assert dim == 1
 
     batch_size, seq_length = x.size()[:2]
     seg_lengths = b - a
     max_seg_length = seg_lengths.max().item()
+    assert isinstance(max_seg_length, int)
 
     mask = length2mask(seg_lengths, max_seg_length)
 
@@ -344,17 +361,17 @@ def index_range_ellipsis(x, a, b, dim=1, padding_zero=True):
     return output
 
 
-def add_dim_as_except(tensor, target, *excepts):
+def add_dim_as_except(tensor: Tensor, target: Tensor, *excepts: int) -> Tensor:
     assert len(excepts) == tensor.dim()
     tensor = tensor.clone()
-    excepts = [e + target.dim() if e < 0 else e for e in excepts]
+    excepts = [e + target.dim() if e < 0 else e for e in excepts]  # type: ignore[assignment]
     for i in range(target.dim()):
         if i not in excepts:
             tensor.unsqueeze_(i)
     return tensor
 
 
-def length2mask(lengths, max_length):
+def length2mask(lengths: torch.Tensor, max_length: int) -> FloatTensor:
     rng = torch.arange(max_length, dtype=lengths.dtype, device=lengths.device)
     lengths = lengths.unsqueeze(-1)
     rng = add_dim_as_except(rng, lengths, -1)
@@ -371,7 +388,10 @@ def prod(values: Sequence[_Num], default: int = 1) -> _Num:
     return reduce(lambda x, y: x * y, values)
 
 
-def clean_tree(sentence: str, remove_tag_set={"<start>", "<end>", "<pad>"}) -> str:
+def clean_tree(
+    sentence: str,
+    remove_tag_set: FrozenSet[str] = frozenset({"<start>", "<end>", "<pad>"}),
+) -> str:
     for tag in remove_tag_set:
         sentence = sentence.replace(tag, " ")
     items = sentence.split()
