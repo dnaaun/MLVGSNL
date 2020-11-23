@@ -1,4 +1,4 @@
-from typing import Collection, Any, List, Tuple, TypeVar, NewType, TypedDict
+from typing import Any, List, Tuple, TypedDict
 from torch import Tensor
 from pathlib import Path
 from argparse import Namespace, ArgumentParser
@@ -25,6 +25,7 @@ def train(
     epoch: int,
     val_loader: "DataLoader",
     vocab: Vocabulary,
+    logger: logging.Logger,
 ) -> None:
     # average meters to record the training statistics
     batch_time = AverageMeter()
@@ -70,7 +71,7 @@ def train(
 
         # validate at every val_step
         if model.Eiters % opt.val_step == 0:
-            validate(opt, val_loader, model, vocab)
+            validate(opt, val_loader, model, vocab, logger)
 
 
 def validate(
@@ -78,6 +79,7 @@ def validate(
     val_loader: "DataLoader",
     model: VGNSL,
     vocab: Vocabulary,
+    logger: logging.Logger,
 ) -> float:
     # compute the encoding for all the validation images and captions
     img_embs, cap_embs = encode_data(
@@ -134,7 +136,6 @@ def accuracy(
     batch_size = target.size(0)
 
     _, pred = output.topk(maxk, 1, True, True)
-    fred = pred.t()
     correct = pred.eq(target.view(1, -1).expand_as(pred))
 
     res = []
@@ -152,8 +153,58 @@ class CheckpointData(TypedDict):
     Eiters: int
 
 
-if __name__ == "__main__":
-    # hyper parameters
+def setup_logging(logger_dir: Path) -> logging.Logger:
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    handler = logging.FileHandler(logger_dir / "train.log", "a")
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console.setFormatter(formatter)
+    logger.addHandler(console)
+    logger.propagate = False
+    return logger
+
+
+def get_latest_checkpoint(logger_dir: Path, logger: logging.Logger) -> CheckpointData:
+    latest_epoch = -1
+    latest_chkpt_path = None
+    for file in logger_dir.iterdir():
+        if file.name.endswith(".pth.tar"):
+            # 0 indexed num
+            epoch_str = file.name.split(".")[0]
+            try:
+                epoch = int(epoch_str)
+            except ValueError:
+                pass
+            else:
+                if epoch > latest_epoch:
+                    latest_epoch = epoch
+                    latest_chkpt_path = file
+    if latest_chkpt_path is None:
+        raise Exception(
+            f"There are no saved checkpoints named '<epoch_num>.pth.tar'"
+            f" in str(logger_dir)."
+        )
+    with latest_chkpt_path.open("rb") as fb:
+        chkpt_data: CheckpointData = torch.load(fb)
+
+    # This is an artifact of the fact that the old code uses a 0-indexed epoch num
+    # for the filename, and a 1-indexed epoch in the CheckpointData saved.
+    if chkpt_data["epoch"] != latest_epoch + 1:
+        raise Exception(f"Epoch in saved file is not same as epoch on the filename.")
+
+    logger.info(
+        f"Loaded checkpoint for (0-based) index number {chkpt_data['epoch']} "
+        "from file: {str(latest_chkpt_path)}"
+    )
+    return chkpt_data
+
+
+def create_parser() -> ArgumentParser:
     parser = ArgumentParser()
     parser.add_argument(
         "--data_path", default="../data/mscoco", help="path to datasets"
@@ -200,6 +251,13 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--logger_name", default="../output/", help="path to save the model and log"
+    )
+    parser.add_argument(
+        "--cont_from_chkpt",
+        action="store_true",
+        help="Resume training from checkpoint saved in logger_name."
+        "If this option is provided, no other options can be "
+        "passed apart from --logger_name, as the options stored in the checkpoint  will be used.",
     )
     parser.add_argument(
         "--img_dim",
@@ -261,27 +319,34 @@ if __name__ == "__main__":
         default=0,
         help="penalization for head-initial inductive bias",
     )
+    return parser
+
+
+if __name__ == "__main__":
+    parser = create_parser()
+
     opt = parser.parse_args()
 
-    # Syntax is tied with semantics
-    opt.syntax_dim = opt.word_dim
+    resuming_training = False
+    checkpt_data = None
 
     # setup logger
     if os.path.exists(opt.logger_name):
         print(f"Warning: the folder {opt.logger_name} exists.")
-    os.system("mkdir {:s}".format(opt.logger_name))
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-    handler = logging.FileHandler(os.path.join(opt.logger_name, "train.log"), "w")
-    handler.setLevel(logging.INFO)
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    console = logging.StreamHandler()
-    console.setLevel(logging.INFO)
-    console.setFormatter(formatter)
-    logger.addHandler(console)
-    logger.propagate = False
+    Path(opt.logger_name).mkdir(exist_ok=True)
+    logger = setup_logging(Path(opt.logger_name))
+
+    if opt.cont_from_chkpt:
+        if not len(vars(opt)) != 2:
+            raise RuntimeError(
+                f"If --cont_from_chkpt is set, no other options are used."
+            )
+        checkpt_data = get_latest_checkpoint(Path(opt.logger_name), logger)
+        opt = checkpt_data["opt"]  # Replace with options from checkpoint
+        resuming_training = True
+    else:
+        # Syntax is tied with semantics
+        opt.syntax_dim = opt.word_dim
 
     subword_suf = ""
     if (opt.init_embeddings_key == "bert") != (opt.init_embeddings_type == "subword"):
@@ -290,11 +355,10 @@ if __name__ == "__main__":
         )
     elif opt.init_embeddings_type == "subword":
         subword_suf = "_subword"
-
     vocab_filename = f"vocab{subword_suf}.pkl"
-
     with open(Path(opt.data_path) / vocab_filename, "rb") as fb:
         vocab: Vocabulary = pkl.load(fb)
+
     opt.vocab_size = len(vocab)
 
     if opt.init_embeddings:
@@ -310,24 +374,33 @@ if __name__ == "__main__":
         opt.workers,
         subword=opt.init_embeddings_type == "subword",
     )
-    opt.vocab_size = len(vocab)
 
     # construct the model
     model = VGNSL(opt)
-
     best_rsum = 0.0
+    start_epoch = 0
+
+    if resuming_training:
+        assert checkpt_data is not None
+        model.load_state_dict(checkpt_data["model"])
+        best_rsum = checkpt_data["best_rsum"]
+
+        # This is because of passing in epoch + 1 CheckpointData()  in for loop below.
+        start_epoch = checkpt_data["epoch"]
+
+        logger.info(f"Resuming training from (0-indexed) epoch num: {start_epoch}")
 
     # Do one test validation run to make sure all is fine
-    validate(opt, val_loader, model, vocab)
+    validate(opt, val_loader, model, vocab, logger)
 
-    for epoch in range(opt.num_epochs):
+    for epoch in range(start_epoch, opt.num_epochs):
         adjust_learning_rate(opt, model.optimizer, epoch)
 
         # train for one epoch
-        train(opt, train_loader, model, epoch, val_loader, vocab)
+        train(opt, train_loader, model, epoch, val_loader, vocab, logger)
 
         # evaluate on validation set using VSE metrics
-        rsum = validate(opt, val_loader, model, vocab)
+        rsum = validate(opt, val_loader, model, vocab, logger)
 
         # remember best R@ sum and save checkpoint
         is_best = rsum > best_rsum

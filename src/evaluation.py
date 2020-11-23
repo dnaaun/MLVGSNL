@@ -8,7 +8,6 @@ from typing import (
     Dict,
     Callable,
     Any,
-    Optional,
     Tuple,
     overload,
     Union,
@@ -22,7 +21,7 @@ from torch.utils.data import DataLoader
 from collections import OrderedDict
 
 from model import VGNSL
-from data import get_eval_loader, PrecompDsetBatch, _Example, PrecompDsetBase
+from data import get_eval_loader, PrecompDsetBase
 from vocab import Vocabulary
 from utils import generate_tree, clean_tree
 
@@ -318,7 +317,7 @@ def t2i(
 
 
 def test_trees(
-    model_path: str, test_caps_fpath: Path = None, test_ground_truth_fpath: Path = None
+    model_path: str, test_data_path: Path=None,
 ) -> Tuple[List[str], List[str]]:
     """ use the trained model to generate parse trees for text """
     # load model and options
@@ -338,10 +337,13 @@ def test_trees(
     # load model state
     model.load_state_dict(checkpoint["model"])
 
+    if test_data_path is None:
+        test_data_path = Path(opt.data_path)
+
     print("Loading dataset..")
     data_loader = get_eval_loader(
-        caps_fpath=caps_fpath,
-        img_fpath=img_fpath,
+        data_path=str(test_data_path),
+        split_name="test",
         vocab=vocab,
         batch_size=opt.batch_size,
         workers=opt.workers,
