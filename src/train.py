@@ -1,4 +1,5 @@
-from typing import Any, List, Tuple, TypedDict
+from __future__ import annotations
+from typing import Any, List, Tuple, TypedDict, cast
 from torch import Tensor
 from pathlib import Path
 from argparse import Namespace, ArgumentParser
@@ -12,6 +13,7 @@ import time
 import torch
 
 import data
+from data import Example, Batch
 from vocab import Vocabulary
 from model import VGNSL
 from evaluation import i2t, t2i, AverageMeter, LogCollector, encode_data
@@ -20,10 +22,10 @@ from torch.utils.data import DataLoader
 
 def train(
     opt: Namespace,
-    train_loader: "DataLoader",
+    train_loader: DataLoader[Example, Batch],
     model: VGNSL,
     epoch: int,
-    val_loader: "DataLoader",
+    val_loader: DataLoader[Example, Batch],
     vocab: Vocabulary,
     logger: logging.Logger,
 ) -> None:
@@ -36,7 +38,7 @@ def train(
     model.train_start()
 
     end = time.time()
-    for i, train_data in enumerate(tqdm.tqdm(train_loader, desc="Training loop")):
+    for i, (lang, train_data) in enumerate(tqdm.tqdm(train_loader, desc="Training loop")):
         # Always reset to train mode
         model.train_start()
 
@@ -47,7 +49,7 @@ def train(
         model.logger = train_logger
 
         # Update the model
-        model.train_emb(*train_data, epoch=epoch)
+        model.train_emb(lang, *train_data, epoch=epoch)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -76,7 +78,7 @@ def train(
 
 def validate(
     opt: Namespace,
-    val_loader: "DataLoader",
+    val_loader: DataLoader[Example, Batch],
     model: VGNSL,
     vocab: Vocabulary,
     logger: logging.Logger,
@@ -359,8 +361,6 @@ if __name__ == "__main__":
     with open(Path(opt.data_path) / vocab_filename, "rb") as fb:
         vocab: Vocabulary = pkl.load(fb)
 
-    opt.vocab_size = len(vocab)
-
     if opt.init_embeddings:
         opt.vocab_init_embeddings = os.path.join(
             opt.data_path, f"{vocab_filename}.{opt.init_embeddings_key}_embeddings.npy"
@@ -374,6 +374,9 @@ if __name__ == "__main__":
         opt.workers,
         subword=opt.init_embeddings_type == "subword",
     )
+
+    opt.vocab_size = len(vocab)
+    opt.langs = cast(data.SingleDataset[Any], train_loader.dataset).langs
 
     # construct the model
     model = VGNSL(opt)

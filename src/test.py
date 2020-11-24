@@ -1,7 +1,6 @@
-# pyright: strict
+from __future__ import annotations
 import argparse
 from typing import List, Tuple, Union
-from typing_extensions import Literal
 
 from evaluation import test_trees
 

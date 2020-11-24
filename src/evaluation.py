@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 from pathlib import Path
 import pickle
@@ -21,7 +22,7 @@ from torch.utils.data import DataLoader
 from collections import OrderedDict
 
 from model import VGNSL
-from data import get_eval_loader, PrecompDsetBase
+from data import get_eval_loader, SingleDataset, Example, Batch
 from vocab import Vocabulary
 from utils import generate_tree, clean_tree
 
@@ -81,7 +82,7 @@ class LogCollector:
 
 def encode_data(
     model: VGNSL,
-    data_loader: DataLoader,
+    data_loader: DataLoader[Example, Batch],
     vocab: Vocabulary,
     log_step: int = 10,
     logging: Callable[[Any], None] = print,
@@ -99,15 +100,17 @@ def encode_data(
     img_embs = None
     cap_embs = None
     logged = False
-    for i, (images, captions, lengths, ids) in enumerate(data_loader):
+    for i, (lang, (images, captions, lengths, ids)) in enumerate(data_loader):
         # make sure val logger is used
         model.logger = val_logger
-        lengths = torch.Tensor(lengths).long()
+        tensor_lengths = torch.Tensor(lengths).long()
         if torch.cuda.is_available():
-            lengths = lengths.cuda()
+            tensor_lengths = tensor_lengths.cuda()
 
         # compute the embeddings
-        model_output = model.forward_emb(images, captions, lengths, volatile=True)
+        model_output = model.forward_emb(
+            lang, images, captions, tensor_lengths, volatile=True
+        )
         (
             img_emb,
             cap_span_features,
@@ -122,8 +125,7 @@ def encode_data(
         # output sampled trees
         if (not logged) or (stage == "test"):
             logged = True
-            if stage == "dev":
-                sample_num = 5
+            sample_num = 5
             for j in range(sample_num):
                 logging(
                     generate_tree(
@@ -131,12 +133,15 @@ def encode_data(
                         tree_indices,
                         j,
                         vocab,
-                        subword=cast(PrecompDsetBase, data_loader.dataset).subword,
+                        subword=cast(SingleDataset, data_loader.dataset).subword,
                     )
                 )
 
         cap_emb = torch.cat(
-            [cap_span_features[l - 2][i].reshape(1, -1) for i, l in enumerate(lengths)],
+            [
+                cap_span_features[l - 2][i].reshape(1, -1)
+                for i, l in enumerate(tensor_lengths)
+            ],
             dim=0,
         )
 
@@ -317,7 +322,8 @@ def t2i(
 
 
 def test_trees(
-    model_path: str, test_data_path: Path=None,
+    model_path: str,
+    test_data_path: Path = None,
 ) -> Tuple[List[str], List[str]]:
     """ use the trained model to generate parse trees for text """
     # load model and options
@@ -355,15 +361,17 @@ def test_trees(
     cap_embs = None
     logged = False
     trees: List[str] = list()
-    for i, (images, captions, lengths, ids) in enumerate(data_loader):
+    for i, (lang, (images, captions, lengths, ids)) in enumerate(data_loader):
         # make sure val logger is used
         model.logger = print  # type: ignore # TODO: This actually looks unsafe. But "if it aint broke, ..."
-        lengths = torch.Tensor(lengths).long()
+        tensor_lengths = torch.Tensor(lengths).long()
         if torch.cuda.is_available():
-            lengths = lengths.cuda()
+            tensor_lengths = tensor_lengths.cuda()
 
         # compute the embeddings
-        model_output = model.forward_emb(images, captions, lengths, volatile=True)
+        model_output = model.forward_emb(
+            lang, images, captions, tensor_lengths, volatile=True
+        )
         (
             img_emb,
             cap_span_features,
@@ -383,7 +391,7 @@ def test_trees(
                     tree_indices,
                     j,
                     vocab,
-                    cast(PrecompDsetBase, data_loader.dataset).subword,
+                    cast(SingleDataset, data_loader.dataset).subword,
                 )
             )
         appended_trees: List[str] = ["" for _ in range(len(ids))]
@@ -391,7 +399,10 @@ def test_trees(
             appended_trees[ids[j] - min(ids)] = clean_tree(candidate_trees[j])
         trees.extend(appended_trees)
         cap_emb = torch.cat(
-            [cap_span_features[l - 2][i].reshape(1, -1) for i, l in enumerate(lengths)],
+            [
+                cap_span_features[l - 2][i].reshape(1, -1)
+                for i, l in enumerate(tensor_lengths)
+            ],
             dim=0,
         )
         del images, captions, img_emb, cap_emb

@@ -1,3 +1,4 @@
+from __future__ import annotations
 # Create a vocabulary wrapper
 from typing import Dict
 

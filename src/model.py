@@ -1,10 +1,11 @@
+from __future__ import annotations
 from typing import TYPE_CHECKING, List, Dict, Any, cast, Tuple, Callable, NamedTuple
 import numpy as np
 from argparse import Namespace
 from collections import OrderedDict
 
 import torch
-from torch import Tensor, IntTensor, FloatTensor
+from torch import Tensor, IntTensor
 import torch.backends.cudnn as cudnn
 import torch.cuda
 import torch.nn as nn
@@ -170,7 +171,6 @@ class EncoderText(nn.Module):
             .float()
         )
 
-        valid_bs = lengths.size(0)
         for i in range(max_select_cnt):
             seq_length = sem_embeddings.size(1)
 
@@ -384,11 +384,17 @@ class VGNSL(object):
         # (V, WordD) # This shape is "effectively". The actual impl is more complicated.
         sem_embedding = make_embeddings(opt, opt.vocab_size, opt.word_dim)
 
-        self.txt_enc = EncoderText(opt, opt.vocab_size, opt.word_dim, sem_embedding)
+        # A list of encoders, one for each language
+        self.txt_encs = nn.ModuleDict(
+            {
+                lang: EncoderText(opt, opt.vocab_size, opt.word_dim, sem_embedding)
+                for lang in opt.langs
+            }
+        )
 
         if torch.cuda.is_available():
             self.img_enc.cuda()
-            self.txt_enc.cuda()
+            self.txt_encs.cuda()
             cudnn.benchmark = True
 
         # loss, reward and optimizer
@@ -398,7 +404,7 @@ class VGNSL(object):
         self.vse_loss_alpha = opt.vse_loss_alpha
         self.lambda_hi = opt.lambda_hi
 
-        params = list(self.txt_enc.parameters())
+        params = list(self.txt_encs.parameters())
         params += list(self.img_enc.fc.parameters())
         self.params = params
 
@@ -411,29 +417,30 @@ class VGNSL(object):
     def state_dict(self) -> Any:
         state_dict = [
             self.img_enc.state_dict(),
-            self.txt_enc.state_dict(),
+            self.txt_encs.state_dict(),
             self.optimizer.state_dict(),
         ]
         return state_dict
 
     def load_state_dict(self, state_dict: Any) -> None:
         self.img_enc.load_state_dict(state_dict[0])
-        self.txt_enc.load_state_dict(state_dict[1])
+        self.txt_encs.load_state_dict(state_dict[1])
         if len(state_dict) >= 3:
             self.optimizer.load_state_dict(state_dict[2])
 
     def train_start(self) -> None:
         """ switch to train mode """
         self.img_enc.train()
-        self.txt_enc.train()
+        self.txt_encs.train()
 
     def val_start(self) -> None:
         """ switch to evaluate mode """
         self.img_enc.eval()
-        self.txt_enc.eval()
+        self.txt_encs.eval()
 
     def forward_emb(
         self,
+        lang: str,
         images: Tensor,  # (B, ImgD)
         captions: Tensor,  # (B, L) or # (B, L, S)
         lengths: Tensor,  # (B,)
@@ -448,7 +455,8 @@ class VGNSL(object):
             # (B, EmbedD)
             img_emb = self.img_enc(images)
 
-            txt_outputs = self.txt_enc(captions, lengths, volatile)
+            txt_enc = self.txt_encs[lang]
+            txt_outputs = txt_enc(captions, lengths, volatile)
         return VGNSLOut(img_emb, *txt_outputs)
 
     def forward_reward(
@@ -488,13 +496,13 @@ class VGNSL(object):
                 if i < lengths[j] - 1:
                     curr_imgs.append(base_img_emb[j].reshape(1, -1))
                     curr_caps.append(
-                        cap_span_features[lengths[j] - 2 - i][j].reshape(1, -1) #type: ignore[call-overload]
+                        cap_span_features[lengths[j] - 2 - i][j].reshape(1, -1)  # type: ignore[call-overload]
                     )
                     curr_left_caps.append(
-                        left_span_features[lengths[j] - 2 - i][j].reshape(1, -1) #type: ignore[call-overload]
+                        left_span_features[lengths[j] - 2 - i][j].reshape(1, -1)  # type: ignore[call-overload]
                     )
                     curr_right_caps.append(
-                        right_span_features[lengths[j] - 2 - i][j].reshape(1, -1) #type: ignore[call-overload]
+                        right_span_features[lengths[j] - 2 - i][j].reshape(1, -1)  # type: ignore[call-overload]
                     )
                     indices.append(j)
 
@@ -519,6 +527,7 @@ class VGNSL(object):
 
     def train_emb(
         self,
+        lang: str,
         # (B, ImgD)
         images: Tensor,
         # (B, L) or (B, L, S)
@@ -550,7 +559,7 @@ class VGNSL(object):
             tree_indices,
             probs,
             span_bounds,
-        ) = self.forward_emb(images, captions, tensor_lengths)
+        ) = self.forward_emb(lang, images, captions, tensor_lengths)
 
         # measure accuracy and record loss
         cum_reward, matching_loss = self.forward_reward(

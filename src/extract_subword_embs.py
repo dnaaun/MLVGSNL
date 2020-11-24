@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import List, Any, Counter
 from pathlib import Path
 from vocab import Vocabulary

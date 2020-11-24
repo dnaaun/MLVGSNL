@@ -100,8 +100,16 @@ venv.bak/
 # mkdocs documentation
 /site
 
-# mypy
 .mypy_cache/
 
-# data
+pyrightconfig.json
+
+# These dirs are hardcoded in either the actual code or
+# in the unit testing code.
 data/
+concat_dset_data
+
+# ctags, exuberant tags, universal tags, ..etc
+tags
+
+qsub.sh
