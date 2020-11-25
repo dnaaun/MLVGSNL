@@ -1,7 +1,6 @@
 from __future__ import annotations
 import os
 from pathlib import Path
-import pickle
 
 from typing import (
     TYPE_CHECKING,
@@ -22,8 +21,15 @@ from torch.utils.data import DataLoader
 from collections import OrderedDict
 
 from model import VGNSL
-from data import get_eval_loader, SingleDataset, Example, Batch
-from vocab import Vocabulary
+from data import (
+    get_eval_loader,
+    SingleDataset,
+    Example,
+    Batch,
+    VGSNLDataset,
+    LanguageData,
+    Lang,
+)
 from utils import generate_tree, clean_tree
 
 if TYPE_CHECKING:
@@ -83,7 +89,6 @@ class LogCollector:
 def encode_data(
     model: VGNSL,
     data_loader: DataLoader[Example, Batch],
-    vocab: Vocabulary,
     log_step: int = 10,
     logging: Callable[[Any], None] = print,
     stage: Literal["dev", "test", "train"] = "dev",
@@ -111,17 +116,9 @@ def encode_data(
         model_output = model.forward_emb(
             lang, images, captions, tensor_lengths, volatile=True
         )
-        (
-            img_emb,
-            cap_span_features,
-            left_span_features,
-            right_span_features,
-            word_embs,
-            tree_indices,
-            all_probs,
-            span_bounds,
-        ) = model_output[:8]
+        img_emb, cap_span_features, _, _, _, tree_indices, _, _ = model_output[:8]
 
+        vocab, _ = cast(VGSNLDataset, data_loader.dataset).lang_datas[lang]
         # output sampled trees
         if (not logged) or (stage == "test"):
             logged = True
@@ -330,13 +327,6 @@ def test_trees(
     checkpoint: "CheckpointData" = torch.load(model_path, map_location="cpu")
     opt = checkpoint["opt"]
 
-    # load vocabulary used by the model
-    vocab_file = "vocab.pkl"
-    if opt.init_embeddings_type == "subword":
-        vocab_file = "vocab_subword.pkl"
-    vocab = pickle.load(open(os.path.join(opt.data_path, vocab_file), "rb"))
-    opt.vocab_size = len(vocab)
-
     # construct model
     model = VGNSL(opt)
 
@@ -350,7 +340,7 @@ def test_trees(
     data_loader = get_eval_loader(
         data_path=str(test_data_path),
         split_name="test",
-        vocab=vocab,
+        vocab_filename=opt.vocab_filename,
         batch_size=opt.batch_size,
         workers=opt.workers,
         subword=opt.init_embeddings_type == "subword",
@@ -358,10 +348,8 @@ def test_trees(
         img_dim=opt.img_dim,
     )
 
-    cap_embs = None
-    logged = False
     trees: List[str] = list()
-    for i, (lang, (images, captions, lengths, ids)) in enumerate(data_loader):
+    for lang, (images, captions, lengths, ids) in data_loader:
         # make sure val logger is used
         model.logger = print  # type: ignore # TODO: This actually looks unsafe. But "if it aint broke, ..."
         tensor_lengths = torch.Tensor(lengths).long()
@@ -372,17 +360,9 @@ def test_trees(
         model_output = model.forward_emb(
             lang, images, captions, tensor_lengths, volatile=True
         )
-        (
-            img_emb,
-            cap_span_features,
-            left_span_features,
-            right_span_features,
-            word_embs,
-            tree_indices,
-            all_probs,
-            span_bounds,
-        ) = model_output[:8]
+        img_emb, cap_span_features, _, _, _, tree_indices, _, _ = model_output[:8]
 
+        vocab, _ = cast(Dict[Lang, LanguageData], opt.lang_datas)[lang]
         candidate_trees = list()
         for j in range(len(ids)):
             candidate_trees.append(
@@ -409,6 +389,6 @@ def test_trees(
 
     ground_truth = [
         line.strip()
-        for line in open(os.path.join(opt.data_path, "test_ground-truth.txt"))
+        for line in open(test_data_path /  "test_ground-truth.txt")
     ]
     return trees, ground_truth

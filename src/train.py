@@ -6,7 +6,6 @@ from argparse import Namespace, ArgumentParser
 import tqdm
 import logging
 import os
-import pickle as pkl
 import shutil
 import time
 
@@ -14,7 +13,6 @@ import torch
 
 import data
 from data import Example, Batch
-from vocab import Vocabulary
 from model import VGNSL
 from evaluation import i2t, t2i, AverageMeter, LogCollector, encode_data
 from torch.utils.data import DataLoader
@@ -26,7 +24,6 @@ def train(
     model: VGNSL,
     epoch: int,
     val_loader: DataLoader[Example, Batch],
-    vocab: Vocabulary,
     logger: logging.Logger,
 ) -> None:
     # average meters to record the training statistics
@@ -38,7 +35,9 @@ def train(
     model.train_start()
 
     end = time.time()
-    for i, (lang, train_data) in enumerate(tqdm.tqdm(train_loader, desc="Training loop")):
+    for i, (lang, train_data) in enumerate(
+        tqdm.tqdm(train_loader, desc="Training loop")
+    ):
         # Always reset to train mode
         model.train_start()
 
@@ -73,21 +72,19 @@ def train(
 
         # validate at every val_step
         if model.Eiters % opt.val_step == 0:
-            validate(opt, val_loader, model, vocab, logger)
+            validate(opt, val_loader, model, logger)
 
 
 def validate(
     opt: Namespace,
     val_loader: DataLoader[Example, Batch],
     model: VGNSL,
-    vocab: Vocabulary,
     logger: logging.Logger,
 ) -> float:
     # compute the encoding for all the validation images and captions
     img_embs, cap_embs = encode_data(
         model,
         val_loader,
-        vocab,
         opt.log_step,
         logger.info,
     )
@@ -240,7 +237,7 @@ def create_parser() -> ArgumentParser:
         help="number of epochs to update the learning rate",
     )
     parser.add_argument(
-        "--workers", default=0, type=int, help="number of data loader workers"
+        "--workers", default=2, type=int, help="number of data loader workers"
     )
     parser.add_argument(
         "--log_step",
@@ -358,26 +355,19 @@ if __name__ == "__main__":
     elif opt.init_embeddings_type == "subword":
         subword_suf = "_subword"
     vocab_filename = f"vocab{subword_suf}.pkl"
-    with open(Path(opt.data_path) / vocab_filename, "rb") as fb:
-        vocab: Vocabulary = pkl.load(fb)
-
-    if opt.init_embeddings:
-        opt.vocab_init_embeddings = os.path.join(
-            opt.data_path, f"{vocab_filename}.{opt.init_embeddings_key}_embeddings.npy"
-        )
 
     # Load data loaders
     train_loader, val_loader = data.get_train_loaders(
         opt.data_path,
-        vocab,
+        vocab_filename,
         opt.batch_size,
         opt.workers,
         subword=opt.init_embeddings_type == "subword",
     )
 
-    opt.vocab_size = len(vocab)
-    opt.langs = cast(data.SingleDataset[Any], train_loader.dataset).langs
-
+    dataset= cast(data.VGSNLDataset[Any], train_loader.dataset)
+    opt.lang_datas = dataset.lang_datas
+    opt.vocab_filename = vocab_filename
     # construct the model
     model = VGNSL(opt)
     best_rsum = 0.0
@@ -394,16 +384,16 @@ if __name__ == "__main__":
         logger.info(f"Resuming training from (0-indexed) epoch num: {start_epoch}")
 
     # Do one test validation run to make sure all is fine
-    validate(opt, val_loader, model, vocab, logger)
+    validate(opt, val_loader, model, logger)
 
     for epoch in range(start_epoch, opt.num_epochs):
         adjust_learning_rate(opt, model.optimizer, epoch)
 
         # train for one epoch
-        train(opt, train_loader, model, epoch, val_loader, vocab, logger)
+        train(opt, train_loader, model, epoch, val_loader, logger)
 
         # evaluate on validation set using VSE metrics
-        rsum = validate(opt, val_loader, model, vocab, logger)
+        rsum = validate(opt, val_loader, model, logger)
 
         # remember best R@ sum and save checkpoint
         is_best = rsum > best_rsum

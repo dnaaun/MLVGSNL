@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, List, Dict, Any, cast, Tuple, Callable, NamedTuple
+from typing import TYPE_CHECKING, List, Dict, cast, Callable, NamedTuple, Any, Tuple
 import numpy as np
 from argparse import Namespace
 from collections import OrderedDict
@@ -10,11 +10,12 @@ import torch.backends.cudnn as cudnn
 import torch.cuda
 import torch.nn as nn
 import torch.nn.init
-import torchvision.models as models  # type: ignore
+import torch.nn
 from torch.distributions import Categorical
 from torch.nn import functional as F
 from torch.nn.utils.clip_grad import clip_grad_norm_
 
+from data import  LanguageData
 from utils import (
     make_embeddings,
     l2norm,
@@ -381,16 +382,24 @@ class VGNSL(object):
         self.grad_clip = opt.grad_clip
         self.img_enc = EncoderImagePrecomp(opt.img_dim, opt.embed_size, opt.no_imgnorm)
 
-        # (V, WordD) # This shape is "effectively". The actual impl is more complicated.
-        sem_embedding = make_embeddings(opt, opt.vocab_size, opt.word_dim)
-
         # A list of encoders, one for each language
-        self.txt_encs = nn.ModuleDict(
-            {
-                lang: EncoderText(opt, opt.vocab_size, opt.word_dim, sem_embedding)
-                for lang in opt.langs
-            }
-        )
+        self.txt_encs: nn.ModuleDict[EncoderText] = nn.ModuleDict()
+
+        lang_datas = cast(Dict[str, LanguageData], opt.lang_datas)
+        for lang, (vocab, lang_dir) in lang_datas.items():
+            # (V, WordD) # This shape is "effectively". The actual impl is more complicated.
+            print(f"Making embedding matrix for: {lang} of size {len(vocab)}.")
+            sem_embedding = make_embeddings(
+                len(vocab),
+                opt.word_dim,
+                lang_dir / f"{opt.vocab_filename}.{opt.init_embeddings_key}_embeddings.npy",
+                opt.init_embeddings_type,
+                opt.init_embeddings_partial_dim,
+            )
+
+            self.txt_encs[lang] = EncoderText(
+                opt, len(vocab), opt.word_dim, sem_embedding
+            )
 
         if torch.cuda.is_available():
             self.img_enc.cuda()

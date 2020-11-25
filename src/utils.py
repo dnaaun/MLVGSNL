@@ -1,11 +1,11 @@
 from __future__ import annotations
+from pathlib import Path
+import numpy as np
 import collections
-from argparse import Namespace
 from functools import reduce
 
 import torch
 from torch import Tensor, FloatTensor, IntTensor
-import numpy as np
 import torch.nn as nn
 from typing import (
     FrozenSet,
@@ -19,8 +19,8 @@ from typing import (
     cast,
     TypeVar,
     Optional,
-    SupportsInt,
 )
+from typing_extensions import Literal
 
 if TYPE_CHECKING:
     from vocab import Vocabulary
@@ -130,32 +130,44 @@ def tree2str(tree: Union[str, List[str]]) -> str:
     return "( " + " ".join(items) + " )"
 
 
-def make_embeddings(opt: Namespace, vocab_size: int, dim: int) -> nn.Module:
-    init_embeddings = None
-    if hasattr(opt, "vocab_init_embeddings"):
-        init_embeddings = torch.from_numpy(np.load(opt.vocab_init_embeddings))
+def make_embeddings(
+    vocab_size: int,
+    dim: int,
+    init_embs_fpath: Path = None,
+    init_embeddings_type: Literal[
+        "override", "partial", "partial-fixed", "subword"
+    ] = None,
+    init_embeddings_partial_dim: int = None,
+) -> nn.Module:
+    initial_embs = None
+    if init_embs_fpath:
+        initial_embs = torch.from_numpy(np.load(init_embs_fpath, allow_pickle=True))
+        print(
+            f"Will initalize embeddings from: {str(init_embs_fpath)} using strategy: ",
+            init_embeddings_type,
+        )
 
     emb: Optional[Callable[[Tensor], Tensor]] = None
-    if opt.init_embeddings_type in ("override", "partial"):
+    if init_embeddings_type in ("override", "partial"):
         emb = nn.Embedding(vocab_size, dim, padding_idx=0)
-        if init_embeddings is not None:
-            if opt.init_embeddings_type == "override":
-                emb.weight.detach().copy_(init_embeddings)
-            else:
-                assert opt.init_embeddings_type == "partial"
-                emb.weight.detach()[:, : init_embeddings.size(1)] = init_embeddings
-    elif opt.init_embeddings_type == "partial-fixed":
-        partial_dim = opt.init_embeddings_partial_dim
+        if initial_embs is not None:
+            if init_embeddings_type == "override":
+                emb.weight.detach().copy_(initial_embs)
+            else:  # partial
+                emb.weight.detach()[:, : initial_embs.size(1)] = initial_embs
+    elif init_embeddings_type == "partial-fixed":
+        assert init_embeddings_partial_dim
+        partial_dim = init_embeddings_partial_dim
         emb1 = nn.Embedding(vocab_size, partial_dim, padding_idx=0)
         emb2 = nn.Embedding(vocab_size, dim - partial_dim, padding_idx=0)
 
-        if init_embeddings is not None:
-            emb1.weight.data.detach().copy_(init_embeddings)
+        if initial_embs is not None:
+            emb1.weight.data.detach().copy_(initial_embs)
         emb1.weight.requires_grad_(False)
 
         emb = EmbeddingCombiner(emb1, emb2)
-    elif opt.init_embeddings_type == "subword":
-        emb = SubwordEmbedder(vocab_size, dim, init_embs=init_embeddings)
+    elif init_embeddings_type == "subword":
+        emb = SubwordEmbedder(vocab_size, dim, init_embs=initial_embs)
     else:
         raise NotImplementedError()
 
@@ -389,6 +401,7 @@ def prod(values: Sequence[_Num], default: int = 1) -> _Num:
     return reduce(lambda x, y: x * y, values)
 
 
+# pyright: reportCallInDefaultInitializer=false
 def clean_tree(
     sentence: str,
     remove_tag_set: FrozenSet[str] = frozenset({"<start>", "<end>", "<pad>"}),

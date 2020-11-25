@@ -4,6 +4,9 @@ from random import Random
 import pickle as pkl
 import math
 from typing import (
+    Dict,
+    overload,
+    NamedTuple,
     Sequence,
     Sized,
     Iterator,
@@ -18,9 +21,8 @@ from typing import (
     List,
     TypeVar,
     Generic,
-    Union,
 )
-from typing_extensions import Literal, Protocol
+from typing_extensions import Protocol
 from pathlib import Path
 import nltk  # type: ignore
 from itertools import chain, accumulate
@@ -38,6 +40,51 @@ if TYPE_CHECKING:
 
 
 _Tco = TypeVar("_Tco", covariant=True)
+_T1 = TypeVar("_T1")
+_T2 = TypeVar("_T2")
+_T3 = TypeVar("_T3")
+_T4 = TypeVar("_T4")
+_T5 = TypeVar("_T5")
+
+
+@overload
+def myzip(__i: Sequence[Tuple[_T1]]) -> Tuple[List[_T1]]:
+    ...
+
+
+@overload
+def myzip(__i: Sequence[Tuple[_T1, _T2]]) -> Tuple[List[_T1], List[_T2]]:
+    ...
+
+
+@overload
+def myzip(
+    __i: Sequence[Tuple[_T1, _T2, _T3]]
+) -> Tuple[List[_T1], List[_T2], List[_T3]]:
+    ...
+
+
+@overload
+def myzip(
+    __i: Sequence[Tuple[_T1, _T2, _T3, _T4]]
+) -> Tuple[List[_T1], List[_T2], List[_T3], List[_T4]]:
+    ...
+
+
+@overload
+def myzip(
+    __i: Sequence[Tuple[_T1, _T2, _T3, _T4, _T5]]
+) -> Tuple[List[_T1], List[_T2], List[_T3], List[_T4], List[_T5]]:
+    ...
+
+
+def myzip(__i: Sequence[Tuple[Any, ...]]) -> Tuple[List[Any], ...]:
+    """Wrap around zip(), and provide two additional benefits.
+
+    1. Type inference for tuples of upto length 5.
+    2. Returned items are lists, not tuples.
+    """
+    return tuple(list(col) for col in zip(*__i))
 
 
 class SizedIndexedIterable(Sized, Iterable[_Tco], Protocol):
@@ -78,6 +125,11 @@ class ConcatSequence(Generic[_Tco]):
         return self.seqs[seq_num][idx]
 
 
+class LanguageData(NamedTuple):
+    vocab: Vocabulary
+    dir_: Path
+
+
 class VGSNLDataset(Dataset, Generic[_Tco]):
     @cached_property
     @abc.abstractmethod
@@ -86,7 +138,7 @@ class VGSNLDataset(Dataset, Generic[_Tco]):
 
     @cached_property
     @abc.abstractmethod
-    def langs(self) -> Ordering[Lang]:
+    def lang_datas(self) -> Dict[Lang, LanguageData]:
         pass
 
     @abc.abstractmethod
@@ -107,10 +159,10 @@ class VGSNLDataset(Dataset, Generic[_Tco]):
 
 
 Lang = str
-WordExample = Tuple[Lang, Tuple[Tensor, Tensor, int, int]]
+WordExample = Tuple[Lang, Tuple[Tensor, List[int], int, int]]
 SubwordExample = Tuple[Lang, Tuple[Tensor, List[List[int]], int, int]]
-Example = TypeVar("Example", WordExample, SubwordExample, covariant=True)
-Batch = Tuple[Lang, Tuple[Tensor, Tensor, List[int], List[int]]] 
+Example = TypeVar("Example", SubwordExample, WordExample)
+Batch = Tuple[Lang, Tuple[Tensor, Tensor, List[int], List[int]]]
 
 
 class SingleDataset(VGSNLDataset[Example]):
@@ -119,28 +171,33 @@ class SingleDataset(VGSNLDataset[Example]):
     """
 
     _captions: List[List[Any]]
+    _vocab: Vocabulary
 
     @cached_property
-    def langs(self) -> Ordering[Lang]:
-        return self._langs
+    def lang_datas(self) -> Dict[Lang, LanguageData]:
+        return {self._lang: LanguageData(self._vocab, Path(self._data_path))}
 
     def __init__(
         self,
         data_path: str,
         data_split: str,
-        vocab: "Vocabulary",
-        load_img: bool = True,
-        img_dim: int = 2048,
+        vocab_filename: str,
+        load_img: bool,
+        img_dim: int,
     ):
-        self.data_split = data_split
-        self.data_path = data_path
-        self.vocab = vocab
-        self.prepare_captions()
+        self._data_split = data_split
+        self._data_path = data_path
+        self._vocab_filename = vocab_filename
+
+        with open(Path(self._data_path) / self._vocab_filename, "rb") as fb:
+            self._vocab: Vocabulary = pkl.load(fb)
+
+        self.prepare_text()
 
         # We assume the directory name is the language identifier.
         # This is actually used only when trianing on multiple languages with
-        # ConcatDset
-        self._langs = Ordering([Path(data_path).name])
+        # ConcatDataset
+        self._lang = Path(data_path).name
 
         generic_caps_per_img_fpath = Path(data_path) / "caps_per_img.txt"
         split_caps_per_img_fpath = Path(data_path) / f"{data_split}_caps_per_img.txt"
@@ -208,7 +265,7 @@ class SingleDataset(VGSNLDataset[Example]):
                 cur_img_num += 1
 
     @abc.abstractmethod
-    def prepare_captions(self) -> None:
+    def prepare_text(self) -> None:
         pass
 
     @abc.abstractmethod
@@ -223,15 +280,16 @@ class SubwordDataset(SingleDataset[SubwordExample]):
     """ load precomputed captions and image features, but using subword tokenization """
 
     _SUBWORD_SEP = "|"
+
     @cached_property
     def subword(self) -> bool:
         return True
 
-    def prepare_captions(self) -> None:
+    def prepare_text(self) -> None:
         self._captions = []
 
-        caps_filename = f"{self.data_split}_caps_subword.txt"
-        with open(os.path.join(self.data_path, caps_filename), "r") as f:
+        caps_filename = f"{self._data_split}_caps_subword.txt"
+        with open(os.path.join(self._data_path, caps_filename), "r") as f:
             for line in f:
                 words = line.strip().lower().split()
                 subwords = [word.split(self._SUBWORD_SEP) for word in words]
@@ -252,30 +310,26 @@ class SubwordDataset(SingleDataset[SubwordExample]):
 
         # caption
         caption = [
-            [self.vocab(token) for token in tokens]
+            [self._vocab(token) for token in tokens]
             for tokens in [["<start>"]] + self._captions[index] + [["<end>"]]
         ]
-        return self._langs[0], (image, caption, index, img_id)
+        return self._lang, (image, caption, index, img_id)
 
     @staticmethod
     def collate_fn(exs: List[SubwordExample]) -> Batch:
         """ build mini-batch tensors from a list of (image, caption) tuples """
 
-        images: List[Tensor]
-        captions: List[List[List[int]]]
-        ids: List[int]
-        data: Sequence[Any]
-        langs, data = zip(*exs)
+        images: Sequence[Tensor]
+        langs, data = myzip(exs)
         if not len(set(langs)) == 1:
             raise Exception(f"This dataset is supposed to have only one language.")
-        lang = langs[0]
 
         # sort a data list by caption length
         # I don't know why though, apart from getting the max seq length. But that is
         # doable without sorting easily. Going by "If it ain't broke, don't fix it".
         data = sorted(data, key=lambda x: len(x[1]), reverse=True)
 
-        images, captions, ids, _ = zip(*data)
+        images, captions, ids, _ = myzip(data)
 
         # (B, ImgD)
         stacked_images = torch.stack(images, 0)
@@ -297,6 +351,7 @@ class SubwordDataset(SingleDataset[SubwordExample]):
                 targets[sent_num, word_num, :end] = torch.tensor(
                     word, device=stacked_images.device
                 )
+        lang = langs[0]
         return lang, (stacked_images, targets, lengths, ids)
 
 
@@ -307,18 +362,17 @@ class WordDataset(SingleDataset[WordExample]):
     def subword(self) -> bool:
         return True
 
+    def prepare_text(self) -> None:
 
-    def prepare_captions(self) -> None:
-        # captions
         self._captions = []
         with open(
-            os.path.join(self.data_path, f"{self.data_split}_caps.txt"), "r"
+            os.path.join(self._data_path, f"{self._data_split}_caps.txt"), "r"
         ) as f:
             for line in f:
                 words = line.strip().lower().split()
                 self._captions.append(words)
         print(
-            f"Read {len(self._captions)} captions from {self.data_split}_caps.txt. For "
+            f"Read {len(self._captions)} captions from {self._data_split}_caps.txt. For "
             "example: "
         )
         for cap in self._captions[:5]:
@@ -332,26 +386,25 @@ class WordDataset(SingleDataset[WordExample]):
         image = torch.tensor(self.images[img_id])
 
         caption = [
-            self.vocab(token)
+            self._vocab(token)
             for token in ["<start>"] + self._captions[index] + ["<end>"]
         ]
 
-        # (l,)
-        torch_caption = torch.tensor(caption)
-        return self._langs[0], (image, torch_caption, index, img_id)
+        return self._lang, (image, caption, index, img_id)
 
     @staticmethod
     def collate_fn(exs: List[WordExample]) -> Batch:
         """ build mini-batch tensors from a list of (image, caption) tuples """
-        # sort a data list by caption length
-        exs.sort(key=lambda x: len(x[1]), reverse=True)
 
-        langs, data = zip(*exs)
+        langs, data = myzip(exs)
         if not len(set(langs)) == 1:
             raise Exception(f"This dataset is supposed to have only one language.")
         lang = langs[0]
 
-        images, captions, ids, _ = (list(_) for _ in zip(*data))
+        # sort a data list by caption length
+        data.sort(key=lambda x: len(x[1]), reverse=True)
+
+        images, captions, ids, _ = myzip(data)
 
         # (B, ImgD)
         stacked_images = torch.stack(images, 0)
@@ -361,18 +414,26 @@ class WordDataset(SingleDataset[WordExample]):
         lengths = [len(cap) for cap in captions]
         for i, cap in enumerate(captions):
             end = len(cap)
-            targets[i, :end] = cap[:end]
+            targets[i, :end] = torch.tensor(cap[:end])
 
         return lang, (stacked_images, targets, lengths, ids)
 
 
-class ConcatDset(VGSNLDataset[Example]):
+class ConcatDataset(VGSNLDataset[Example]):
 
     seq_of_dsets: ConcatSequence[Example]
 
     @cached_property
     def subword(self) -> bool:
         return self._subword
+
+    @cached_property
+    def lang_datas(self) -> Dict[Lang, LanguageData]:
+        result = {}
+        for dset in self.seq_of_dsets.seqs:
+            dset = cast(SingleDataset, dset)
+            result.update(dset.lang_datas)
+        return result
 
     @cached_property
     def langs(self) -> Ordering[Lang]:
@@ -382,10 +443,10 @@ class ConcatDset(VGSNLDataset[Example]):
         self,
         data_path: str,
         data_split: str,
-        vocab: "Vocabulary",
+        vocab_filename: str,
         subword: bool,
-        load_img: bool = True,
-        img_dim: int = 2048,
+        load_img: bool,
+        img_dim: int,
     ):
         dir_ = Path(data_path)
 
@@ -400,7 +461,15 @@ class ConcatDset(VGSNLDataset[Example]):
             if "vocab" in subdir.name:
                 continue
             langs.append(subdir.name)
-            dsets.append(dset_class(str(subdir), data_split, vocab))
+            dsets.append(
+                dset_class(
+                    str(subdir),
+                    data_split,
+                    vocab_filename,
+                    load_img=load_img,
+                    img_dim=img_dim,
+                )
+            )
 
         self.seq_of_dsets = ConcatSequence(tuple(dsets))
         self._langs = Ordering(langs)
@@ -431,7 +500,10 @@ class ConcatDset(VGSNLDataset[Example]):
 
 class DontMixBatchSampler(Sampler):
     def __init__(
-        self, data_source: ConcatDset[Any], batch_size: int = 128, shuffle: bool = True
+        self,
+        data_source: ConcatDataset[Any],
+        batch_size: int = 128,
+        shuffle: bool = True,
     ) -> None:
         batches_in_each = [
             math.ceil(len(dset) / batch_size) for dset in data_source.seq_of_dsets.seqs
@@ -479,14 +551,20 @@ class DontMixBatchSampler(Sampler):
 
 def is_concat_dset_path(dset_path: Path) -> bool:
     # Has sub directory wiht training files
-    is_too = bool(list(dset_path.glob("*/train*caps.txt")))
+    is_too = len(list(dset_path.glob("*/*_caps*.txt"))) != 0
     # Has training files as first level descendants
-    is_not = bool(list(dset_path.glob("train*caps.txt")))
+    is_not = len(list(dset_path.glob("*_caps*.txt"))) != 0
 
     if is_too and is_not:
         raise Exception(
-            f"Dataset dir {str(dset_path)} has training files at both "
+            f"--data_path has training files at both "
             " top level and one level deep. Please choose one."
+        )
+    elif not (is_too or is_not):
+        raise Exception(
+            f"--data_path has no file matching '*_caps*.txt' at "
+            "top level, nor does it have such a file at one level deep. "
+            "Are you sure you typed it right?"
         )
     return is_too
 
@@ -494,7 +572,7 @@ def is_concat_dset_path(dset_path: Path) -> bool:
 def get_precomp_loader(
     data_path: str,
     data_split: str,
-    vocab: "Vocabulary",
+    vocab_filename: str,
     subword: bool,
     batch_size: int = 128,
     shuffle: bool = True,
@@ -503,11 +581,14 @@ def get_precomp_loader(
     img_dim: int = 2048,
 ) -> DataLoader[Example, Batch]:
 
-    dset: VGSNLDataset[Example]
+    dset: VGSNLDataset[Any]
     if is_concat_dset_path(Path(data_path)):
-        dset = ConcatDset(data_path, data_split, vocab, subword, load_img, img_dim)
+        print(f"--data_path points to a concatenated dataset. Proceeding accrodingly.")
+        dset = ConcatDataset(
+            data_path, data_split, vocab_filename, subword, load_img, img_dim
+        )
         batch_sampler = DontMixBatchSampler(dset, batch_size, shuffle)
-        data_loader: DataLoader[Example, Batch] = DataLoader(
+        data_loader: DataLoader[Any, Batch] = DataLoader(
             dset,
             batch_sampler=batch_sampler,
             num_workers=num_workers,
@@ -520,29 +601,29 @@ def get_precomp_loader(
             dset_class = SubwordDataset
         else:
             dset_class = WordDataset
-        dset = dset_class(data_path, data_split, vocab, load_img, img_dim)
+        dset = dset_class(data_path, data_split, vocab_filename, load_img, img_dim)
 
         data_loader = DataLoader(
             dataset=dset,
             batch_size=batch_size,
             shuffle=shuffle,
             pin_memory=True,
-            collate_fn=lambda x: None,
+            collate_fn=dset.collate_fn,
         )
     return data_loader
 
 
 def get_train_loaders(
     data_path: str,
-    vocab: "Vocabulary",
+    vocab_filename: str,
     batch_size: int,
     workers: int,
-    subword: Union[Literal[True], Literal[False]],
+    subword: bool,
 ) -> Tuple[DataLoader[Example, Batch], DataLoader[Example, Batch]]:
     train_loader = get_precomp_loader(
         data_path=data_path,
         data_split="train",
-        vocab=vocab,
+        vocab_filename=vocab_filename,
         subword=subword,
         batch_size=batch_size,
         shuffle=True,
@@ -551,21 +632,21 @@ def get_train_loaders(
     val_loader = get_precomp_loader(
         data_path=data_path,
         data_split="dev",
-        vocab=vocab,
+        vocab_filename=vocab_filename,
         subword=subword,
         batch_size=batch_size,
         shuffle=False,
         num_workers=workers,
     )
 
-    return train_loader, val_loader
+    return train_loader, val_loader  # type: ignore[return-value]
 
 
 def get_eval_loader(
     data_path: str,
     split_name: str,
-    vocab: "Vocabulary",
-    subword: Union[Literal[True], Literal[False]],
+    vocab_filename: str,
+    subword: bool,
     batch_size: int,
     workers: int,
     load_img: bool = False,
@@ -574,7 +655,7 @@ def get_eval_loader(
     eval_loader = get_precomp_loader(
         data_path=data_path,
         data_split=split_name,
-        vocab=vocab,
+        vocab_filename=vocab_filename,
         subword=subword,
         batch_size=batch_size,
         shuffle=False,
@@ -582,7 +663,7 @@ def get_eval_loader(
         load_img=load_img,
         img_dim=img_dim,
     )
-    return eval_loader
+    return eval_loader  # type: ignore[return-value]
 
 
 ##################### TESTS #################################
@@ -610,8 +691,8 @@ def test_dont_mix_sampler() -> None:
             return len(self.seq_of_dsets)
 
         collate_fn = None  # type: ignore
-        langs = None # type: ignore
-        subword = None # type: ignore
+        lang_datas = None  # type: ignore
+        subword = None  # type: ignore
 
     src = Src([list(range(5)), list(range(5, 18))])
 
@@ -619,7 +700,7 @@ def test_dont_mix_sampler() -> None:
     for bsize in [1, 3, 4, 6]:
         for shuffle in (True, False):
             sampler = DontMixBatchSampler(
-                cast(ConcatDset[Any], src), batch_size=bsize, shuffle=shuffle
+                cast(ConcatDataset[Any], src), batch_size=bsize, shuffle=shuffle
             )
 
             total = set()
@@ -643,20 +724,24 @@ def test_dont_mix_sampler() -> None:
 def test_concat_dset() -> None:
     import pytest
     import tqdm
-    from  typing import Counter
+    from typing import Counter
 
     data_dir = Path(__file__).parent.parent / "concat_dset_data"
     if not data_dir.exists():
         pytest.skip(f"Skipping test as {str(data_dir)} doesn't exist.")
 
-    with open(data_dir / "vocab_subword.pkl", "rb") as fb:
-        vocab = pkl.load(fb)
-    dset = ConcatDset(
-        str(data_dir), data_split="train", vocab=vocab, subword=True, load_img=True
+    dset = ConcatDataset(
+        str(data_dir),
+        data_split="train",
+        vocab_filename="vocab_subword.pkl",
+        subword=True,
+        load_img=True,
     )
     batch_sampler = DontMixBatchSampler(dset, batch_size=128)
     dloader: DataLoader[SubwordExample, Batch]
-    dloader = DataLoader(dset, batch_sampler=batch_sampler, collate_fn=dset.collate_fn, num_workers=20)
+    dloader = DataLoader(
+        dset, batch_sampler=batch_sampler, collate_fn=dset.collate_fn, num_workers=20
+    )
     cnter: Counter[Lang] = Counter()
     pbar = tqdm.tqdm(dloader)
     total = 0
@@ -665,3 +750,4 @@ def test_concat_dset() -> None:
         total += 1
         # proportions = { l: c / total for l,c in cnter.items() }
     print(f"The dataloader had this num of batches per lang: ", cnter)
+    assert set(dset.lang_datas.keys()) == set(cnter.keys())

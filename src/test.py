@@ -1,5 +1,6 @@
 from __future__ import annotations
 import argparse
+from pathlib import Path
 from typing import List, Tuple, Union
 
 from evaluation import test_trees
@@ -85,16 +86,26 @@ if __name__ == "__main__":
         "--candidate", type=str, required=True, help="model path to evaluate"
     )
     parser.add_argument(
-        "test-files",
-        type=str,
-        nargs="+",
-        help="additional files to test on."
+        "test_data_paths",
+        type=Path,
+        nargs="*",
+        help="The directories in which test files are present."
         " If this option is provided, the test file in the data_path of this model"
         " will not be considered.",
     )
-    args = parser.parse_args()
+    args = vars(parser.parse_args())
 
-    trees, ground_truth = test_trees(args.candidate)
-    f1, _, _ = f1_score(trees, ground_truth)
-    print("Model:", args.candidate)
-    print("F1 score:", f1)
+
+    if test_data_paths:= args.get("test_data_paths"):
+        for path in test_data_paths:
+            print("asdf")
+            trees, ground_truth = test_trees(args["candidate"], path)
+            f1, _, _ = f1_score(trees, ground_truth)
+            print("Test data path:", str(path), "Model:", args["candidate"])
+            print("F1 score:", f1)
+    else:
+        trees, ground_truth = test_trees(args["candidate"])
+        f1, _, _ = f1_score(trees, ground_truth)
+        print("Model:", args["candidate"])
+        print("F1 score:", f1)
+
