@@ -9,3 +9,5 @@ git+https://github.com/udnaan/self-attentive-parser#egg=benepar
 tensorflow
 typing_extensions
 transformers
+word2word
+stanza
