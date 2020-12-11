@@ -1,65 +1,120 @@
 from __future__ import annotations
+from collections import Counter
+import pandas as pd
 from itertools import islice
-
-import stanza  # type: ignore
+import stanza
+from stanza.models.common.doc import Document, Word, Sentence
+from more_itertools import split_before
 import pandas as pd
 import typer
 from dnips.iter.bidict import Ordering
+from dnips.iter import myzip
 import tqdm
 import numpy as np
-from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import (
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Sized,
+    Tuple,
+    Union,
+    overload,
+)
 from word2word import Word2word
 from pathlib import Path
 
 
-def get_word_subword_matrix(
-    subword_order: Ordering[str],
-    word_order: Ordering[str],
-    examples: List[List[List[str]]],
-) -> "np.ndarray[np.float64]":
-    mat = np.zeros((len(word_order), len(subword_order)), dtype=np.float64)
-
-    for sent in examples:
-        for word in sent:
-            word_idx = word_order.indices["".join(word)]
-            for subword in word:
-                subword_idx = subword_order.indices[subword]
-                mat[word_idx, subword_idx] += 1
-    return mat
+def bert_join_subwords(subwords: Sequence[str]) -> str:
+    new_subwords = []
+    for subword in subwords:
+        if subword[:2] == "##":
+            assert len(subword) > 2
+            subword = subword[2:]
+        new_subwords.append(subword)
+    return "".join(new_subwords)
 
 
-def read_conc_scores(english_conc_file: Path, conc_score_col: str) -> Dict[str, float]:
+def read_conc_scores(english_conc_file: Path, conc_score_col: str) -> pd.Series[float]:
     df = pd.read_csv(english_conc_file, sep="\t")
     print(f"Read {len(df)} columns from english concretenesss CSV.")
-    lemmas = df["Word"].str.lower()
-    scores = df[conc_score_col].tolist()
-    conc_scores = {lemma: score for lemma, score in zip(lemmas, scores)}
-    return conc_scores
+    df["Word"] = df["Word"].str.lower()
+    df.set_index("Word", inplace=True)
+    scores = df[conc_score_col]
+    return scores
 
 
 class StanzaLemmatizer:
+    """The shenanigans below (namely, adding _MARKER tokens, joining multiple
+    words into one by \n\n (which stanza recognizes as sentence sep) )
+    is to enable batched prediction."""
+
+    _MARKER = "BEGIN"
+
     def __init__(self, pipeline: stanza.Pipeline) -> None:
         self._pline = pipeline
 
     @classmethod
     def by_lang(cls, lang: str) -> StanzaLemmatizer:
-        pline = stanza.Pipeline(lang, processors="tokenize,lemma")
+        pline = stanza.Pipeline(
+            lang,
+            processors="tokenize,lemma",
+            tokenize_batch_size=4000,
+            lemma_batch_size=4000,
+        )
         return cls(pipeline=pline)
 
-    def __call__(self, word: str) -> Optional[str]:
-        doc = self._pline(word)
-        if len(doc.sentences) != 1:
+    @overload
+    def __call__(self, __words: str) -> Optional[str]:
+        ...
+
+    @overload
+    def __call__(self, __words: List[str]) -> List[Optional[str]]:
+        ...
+
+    def __call__(
+        self, input_: Union[str, List[str]]
+    ) -> Union[Optional[str], List[Optional[str]]]:
+        if isinstance(input_, str):
+            return self._do_on_list([input_])[0]
+        else:
+            return self._do_on_list(input_)
+
+    def _do_on_list(self, words: List[str]) -> List[Optional[str]]:
+        words = self._add_marker_toks(words)
+        doc = self._pline("\n\n".join(words))
+        per_orig_word = list(
+            split_before(doc.sentences, lambda sent: sent.words[0].text == self._MARKER)
+        )
+        res = list(map(self.extract_lemma, per_orig_word))
+        return res
+
+    def _add_marker_toks(self, batch: List[str]) -> List[str]:
+        return [f"{self._MARKER} {s}" for s in batch]
+
+    def extract_lemma(self, sents: List[Sentence]) -> Optional[str]:
+        if len(sents) == 0 or len(sents[0].words) == 0:
+            raise Exception("This should never happen.")
+        if len(sents) != 1:  # word pasred as multiple sentences
             return None
-        if len(doc.sentences[0].words) != 1:  # More than one token
+        if len(sents[0].words) != 2:  # word parsed as mutliple words
             return None
-        return doc.sentences[0].words[0].lemma
+        # sents[0].words[1] is BEGIN
+        return sents[0].words[1].lemma
 
 
 def get_word_concreteness(
-    en_conc_scores: Dict[str, float], words: Ordering, lang: str
-) -> List[Optional[float]]:
+    en_conc_scores: pd.Series[float], words: pd.Index[str], lang: str
+) -> pd.Series[float]:
 
     # Setup lemmatization
+
+    translator: Callable[[str], Optional[str]]
+    en_lemmatizer: Callable[[str], Optional[str]]
+    other_lemmatizer: Callable[[str], Optional[str]]
 
     en_lemmatizer = StanzaLemmatizer.by_lang("en")
     if lang == "en":
@@ -76,40 +131,62 @@ def get_word_concreteness(
             except KeyError:
                 return None
 
+    other_failed_to_lemmatize = 0
+    trans_failed_to_lemmatize = 0
+    failed_to_trans = 0
+
+    no_score_for_lemma = 0
     word_scores: List[Optional[float]] = []
     for word in tqdm.tqdm(words, desc=f"Getting word concreteness for {lang}"):
         # Lemmatize before translate
         lemma = other_lemmatizer(word)
         if lemma is None:
             word_scores.append(None)
+            other_failed_to_lemmatize += 1
             continue
 
         translation = translator(lemma)
 
         if translation is None:
             word_scores.append(None)
+            failed_to_trans += 1
             continue
 
         # Lemmatize after translate
-        en_lemma = en_lemmatizer(translation)
+        en_lemma: Optional[str] = en_lemmatizer(translation)  # type: ignore[misc]
         if en_lemma is None:
             word_scores.append(None)
+            trans_failed_to_lemmatize += 1
             continue
 
-        score = en_conc_scores.get(en_lemma, None)
+        score = None
+        if en_lemma in en_conc_scores.index:
+            score = en_conc_scores[en_lemma]
+        if score is None:
+            no_score_for_lemma += 1
         word_scores.append(score)
 
     num_words = sum(0 if s is None else 1 for s in word_scores)
     print(
         f"For language {lang}, found concreteness measure "
         f"for {num_words} words, out of {len(words)}."
+        f" {other_failed_to_lemmatize} words in '{lang}' failed to lemmatize."
+        f" {failed_to_trans} lemmas failed to translate."
+        f" {trans_failed_to_lemmatize} translations to english failed to lemmatize."
+        f" {no_score_for_lemma} lemmas had no scores."
     )
-    return word_scores
+    scores, words = myzip(  # type: ignore
+        [(score, word) for score, word in zip(word_scores, words) if score is not None]
+    )
+    sr = pd.Series(scores, index=words)
+    return sr
 
 
-def get_subword_examples(
-    train_file: Path, subword_sep: str = "|"
-) -> Tuple[Ordering[str], Ordering[str], List[List[List[str]]]]:
+def get_word_subword_matrix(
+    train_file: Path,
+    subword_sep: str = "|",
+    join_subwords_func: Callable[[Sequence[str]], str] = bert_join_subwords,
+) -> pd.DataFrame:
     with train_file.open() as f:
         words_per_line = [line.strip().split() for line in f]
 
@@ -119,28 +196,33 @@ def get_subword_examples(
 
     # Remove "subword marks". For eg, BERT adds ## to subwords that don't appear
     # at beginining of word
-    final = []
-    unique_subwords = set()
-    unique_words = set()
+    words = {}
     for sent in subwords_per_word_per_line:
-        new_sent = []
-        for word in sent:
-            new_word = [word[0]]
+        for subwords in sent:
+            word = join_subwords_func(subwords)
+            subword_cnt = dict(Counter(subwords))
+            if word not in words:
+                words[word] = subword_cnt
+            else:
+                # check to make sure sure all subword tokenizations of this word are teh same
+                assert words[word] == subword_cnt
+    res = pd.DataFrame.from_dict(words).T.fillna(0)
 
-            for subword in word[1:]:
-                if subword[:2] == "##":
-                    assert len(subword) > 2
-                    new_subword = subword[2:]
-                else:
-                    new_subword = subword
+    return res
 
-                new_word.append(new_subword)
-                unique_subwords.add(new_subword)
 
-            unique_words.add("".join(new_word))
-            new_sent.append(new_word)
-        final.append(new_sent)
-    return Ordering(sorted(unique_subwords)), Ordering(sorted(unique_words)), final
+def get_single_lang_stats(
+    mat: np.ndarray, subword_dim: int, word_dim: int
+) -> Dict[str, float]:
+
+    return {
+        "Average num of subwords in word": (mat > 0).sum(axis=subword_dim).mean(),
+        "Average num of words that a subword appears in": (mat > 0)
+        .sum(axis=word_dim)
+        .mean(),
+        "Num subwords": mat.shape[0],
+        "Num words": mat.shape[1],
+    }
 
 
 def main(
@@ -151,35 +233,110 @@ def main(
     concreteness_score_file: Path,
     conc_score_col: str = "Conc.M",
 ) -> None:
-    lang1_subword_order, lang1_word_order, lang1_exs = get_subword_examples(
-        lang1_train_file
-    )[:5]
-    lang2_subword_order, lang2_word_order, lang2_exs = get_subword_examples(
-        lang2_train_file
-    )[:5]
+    lang1_word_subword_mat = get_word_subword_matrix(lang1_train_file)
+    lang2_word_subword_mat = get_word_subword_matrix(lang2_train_file)
+
+    for lang, df in [(lang1, lang1_word_subword_mat), (lang2, lang2_word_subword_mat)]:
+        print(
+            f"For lang {lang}",
+            get_single_lang_stats(df.to_numpy(), word_dim=0, subword_dim=1),
+        )
+
     en_conc_scores = read_conc_scores(
         english_conc_file=concreteness_score_file,
         conc_score_col=conc_score_col,
     )
-    # lang2_exs = get_subword_examples(lang2_train_file)[:5]
     lang1_word_conc = get_word_concreteness(
         en_conc_scores=en_conc_scores,
-        words=lang1_word_order[-50:],
+        words=lang1_word_subword_mat.index,
         lang=lang1,
     )
     lang2_word_conc = get_word_concreteness(
         en_conc_scores=en_conc_scores,
-        words=lang2_word_order[-50:],
+        words=lang2_word_subword_mat.index,
         lang=lang2,
     )
 
-    lang1_word_subword_mat = get_word_subword_matrix(
-        lang1_subword_order, lang1_word_order, lang1_exs
+    # Get common subwords
+    comm_subwords = lang1_word_subword_mat.columns & lang2_word_subword_mat.columns
+    num_all_subwords = len(
+        lang1_word_subword_mat.columns | lang2_word_subword_mat.columns
     )
-    lang2_word_subword_mat = get_word_subword_matrix(
-        lang2_subword_order, lang2_word_order, lang2_exs
+    print(
+        f"Found {len(comm_subwords)} common subwords out of {num_all_subwords} subwords in total."
+        " For {}, that is {:.1%}".format(
+            lang1, len(comm_subwords) / lang1_word_subword_mat.shape[1]
+        )
+        + " For {}, that is {:.1%}".format(
+            lang2, len(comm_subwords) / lang2_word_subword_mat.shape[1]
+        )
     )
+    # Narrow down to common subwords
+    lang1_word_subword_mat = lang1_word_subword_mat.loc[:, comm_subwords]
+    lang2_word_subword_mat = lang2_word_subword_mat.loc[:, comm_subwords]
+
+    # Narrow down to words that can be formed with the common subwords
+    lang1_made_of_comm_subwords_filter = lang1_word_subword_mat.sum(axis=1) > 0
+    lang2_made_of_comm_subwords_filter = lang2_word_subword_mat.sum(axis=1) > 0
+
+    print(
+        "After filtering out words that don't use subwords from other lang, we are left with num of words:\t"
+        f"{lang1}:  {lang1_made_of_comm_subwords_filter.sum()}; "
+        f"{lang2}:  {lang2_made_of_comm_subwords_filter.sum()}."
+    )
+
+    # Narrow down to words that have concreteness scores
+    lang1_in_conc_filter = lang1_word_subword_mat.index.isin(lang1_word_conc.index)
+    lang2_in_conc_filter = lang2_word_subword_mat.index.isin(lang2_word_conc.index)
     breakpoint()
+
+    print(
+        "Found in concreteness lexicon"
+        f" {lang1_in_conc_filter.sum()} words from {lang1} file, and "
+        f" {lang2_in_conc_filter.sum()} words from {lang2} file"
+    )
+    final_lang1_word_filter = lang1_made_of_comm_subwords_filter & lang1_in_conc_filter
+    final_lang2_word_filter = lang2_made_of_comm_subwords_filter & lang2_in_conc_filter
+
+    print(
+        "After filtering out both words that don't use subwords from other lang, "
+        " as well as words without concreteness scores, we are left with "
+        f"{final_lang1_word_filter.sum()} words for {lang1} and"
+        f" {final_lang2_word_filter.sum()} words for {lang2}."
+    )
+
+    lang1_word_subword_mat = lang1_word_subword_mat.loc[final_lang1_word_filter]
+    lang2_word_subword_mat = lang2_word_subword_mat.loc[final_lang2_word_filter]
+
+    if lang1_word_subword_mat.shape[1] != lang2_word_subword_mat.shape[1]:
+        raise Exception(
+            f"word-subword matrices narrowed down to different num of subwords. Must be a bug."
+        )
+
+    # Compute subword concreteness
+    # Let W_s be the set of all words with concreteness scores that subword s appears in
+    # the subword concretenss is defined as the weighted average of the concreteness
+    # scores of words in W_s, where the weight is the percentage of times the subword
+    # appears in that word
+    lang1_word_weights = lang1_word_subword_mat / lang1_word_subword_mat.to_numpy().sum(
+        axis=0, keepdims=True
+    )
+    lang2_word_weights = lang2_word_subword_mat / lang2_word_subword_mat.to_numpy().sum(
+        axis=0, keepdims=True
+    )
+
+    assert lang1_word_weights.shape == lang1_word_subword_mat.shape
+    assert np.allclose(lang1_word_weights.sum(axis=0), 1)  # type: ignore[arg-type]
+
+    lang1_subword_conc = (
+        lang1_word_subword_mat * lang1_word_weights
+    ).T @ lang1_word_conc
+    lang2_subword_conc = (
+        lang2_word_subword_mat * lang2_word_weights
+    ).T @ lang2_word_conc
+
+    corr = np.corrcoef(lang1_subword_conc, lang2_subword_conc)
+    print(f"The subword concreteness pearson correlation is: {corr}")
 
 
 if __name__ == "__main__":
