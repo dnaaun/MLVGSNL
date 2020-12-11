@@ -1,3 +1,4 @@
+## Imports
 from __future__ import annotations
 from collections import Counter
 import pandas as pd
@@ -27,6 +28,8 @@ from typing import (
 from word2word import Word2word
 from pathlib import Path
 
+##
+
 
 def bert_join_subwords(subwords: Sequence[str]) -> str:
     new_subwords = []
@@ -53,6 +56,7 @@ class StanzaLemmatizer:
     is to enable batched prediction."""
 
     _MARKER = "BEGIN"
+    _STANZA_DIR = "/projectnb/llamagrp/davidat/stanza_resources/"
 
     def __init__(self, pipeline: stanza.Pipeline) -> None:
         self._pline = pipeline
@@ -62,8 +66,9 @@ class StanzaLemmatizer:
         pline = stanza.Pipeline(
             lang,
             processors="tokenize,lemma",
-            tokenize_batch_size=4000,
-            lemma_batch_size=4000,
+            tokenize_batch_size=8000,
+            lemma_batch_size=8000,
+            dir=cls._STANZA_DIR,
         )
         return cls(pipeline=pline)
 
@@ -225,6 +230,22 @@ def get_single_lang_stats(
     }
 
 
+##  End of helper funcs
+
+
+if False:
+## We run this manually through vim-ipy only
+    lang1 = "en"
+    lang2 = "de"
+    lang1_train_file = Path("/project/llamagrp/davidat/mlvgsnl/concat_dset_data/multi30k_en/train_caps_subword.txt")
+    lang2_train_file = Path("/project/llamagrp/davidat/mlvgsnl/concat_dset_data/multi30k_de/train_caps_subword.txt")
+    concreteness_score_file = Path(
+        "/projectnb/statnlp/davidat/mlvgsnl/Concreteness_English.txt"
+    )
+    conc_score_col = "Conc.M"
+##
+
+
 def main(
     lang1: str,
     lang2: str,
@@ -257,6 +278,32 @@ def main(
         lang=lang2,
     )
 
+    # Filter out words without concreteness scores
+    lang1_word_subword_mat = lang1_word_subword_mat.reindex(
+        lang1_word_subword_mat.index & lang1_word_conc.index
+    )
+    lang2_word_subword_mat = lang2_word_subword_mat.reindex(
+        lang2_word_subword_mat.index & lang2_word_conc.index
+    )
+    print(
+        f"After filtering out words not in concreteness lexicon, "
+        f"{lang1} has {lang1_word_subword_mat.shape[0]} words, "
+        f"{lang2} has {lang2_word_subword_mat.shape[0]} words. "
+    )
+
+    # Remove subwords that are not needed anymore
+    lang1_still_there_subwords = lang1_word_subword_mat.sum(axis=0) > 0
+    lang2_still_there_subwords = lang2_word_subword_mat.sum(axis=0) > 0
+
+    lang1_word_subword_mat = lang1_word_subword_mat.loc[:, lang1_still_there_subwords]
+    lang2_word_subword_mat = lang2_word_subword_mat.loc[:, lang2_still_there_subwords]
+
+    print(
+        f"After filtering out subwords that are not needed by concrete words, "
+        f"{lang1} has {lang1_word_subword_mat.shape[1]} subwords, "
+        f"{lang2} has {lang2_word_subword_mat.shape[1]} subwords. "
+    )
+
     # Get common subwords
     comm_subwords = lang1_word_subword_mat.columns & lang2_word_subword_mat.columns
     num_all_subwords = len(
@@ -274,6 +321,7 @@ def main(
     # Narrow down to common subwords
     lang1_word_subword_mat = lang1_word_subword_mat.loc[:, comm_subwords]
     lang2_word_subword_mat = lang2_word_subword_mat.loc[:, comm_subwords]
+    "bol" in comm_subwords
 
     # Narrow down to words that can be formed with the common subwords
     lang1_made_of_comm_subwords_filter = lang1_word_subword_mat.sum(axis=1) > 0
@@ -285,28 +333,9 @@ def main(
         f"{lang2}:  {lang2_made_of_comm_subwords_filter.sum()}."
     )
 
-    # Narrow down to words that have concreteness scores
-    lang1_in_conc_filter = lang1_word_subword_mat.index.isin(lang1_word_conc.index)
-    lang2_in_conc_filter = lang2_word_subword_mat.index.isin(lang2_word_conc.index)
-    breakpoint()
 
-    print(
-        "Found in concreteness lexicon"
-        f" {lang1_in_conc_filter.sum()} words from {lang1} file, and "
-        f" {lang2_in_conc_filter.sum()} words from {lang2} file"
-    )
-    final_lang1_word_filter = lang1_made_of_comm_subwords_filter & lang1_in_conc_filter
-    final_lang2_word_filter = lang2_made_of_comm_subwords_filter & lang2_in_conc_filter
-
-    print(
-        "After filtering out both words that don't use subwords from other lang, "
-        " as well as words without concreteness scores, we are left with "
-        f"{final_lang1_word_filter.sum()} words for {lang1} and"
-        f" {final_lang2_word_filter.sum()} words for {lang2}."
-    )
-
-    lang1_word_subword_mat = lang1_word_subword_mat.loc[final_lang1_word_filter]
-    lang2_word_subword_mat = lang2_word_subword_mat.loc[final_lang2_word_filter]
+    lang1_word_subword_mat = lang1_word_subword_mat.loc[lang1_made_of_comm_subwords_filter]
+    lang2_word_subword_mat = lang2_word_subword_mat.loc[lang2_made_of_comm_subwords_filter]
 
     if lang1_word_subword_mat.shape[1] != lang2_word_subword_mat.shape[1]:
         raise Exception(
@@ -330,10 +359,10 @@ def main(
 
     lang1_subword_conc = (
         lang1_word_subword_mat * lang1_word_weights
-    ).T @ lang1_word_conc
+    ).T @ lang1_word_conc.loc[lang1_word_subword_mat.index]
     lang2_subword_conc = (
         lang2_word_subword_mat * lang2_word_weights
-    ).T @ lang2_word_conc
+    ).T @ lang2_word_conc.loc[lang2_word_subword_mat.index]
 
     corr = np.corrcoef(lang1_subword_conc, lang2_subword_conc)
     print(f"The subword concreteness pearson correlation is: {corr}")
