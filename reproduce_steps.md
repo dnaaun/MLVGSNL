@@ -1,13 +1,3 @@
-# [Multilingual Visually Grounded Neural Syntax Acquisition]
-
-This code is based on [the repo for visually grounded neural syntax acquisition](https://github.com/ExplorerFreda/VGNSL)
-
-## Requirements
-
-Doing `pip install -r requirements.txt` should get you setup with all you need.
-
-See also [env/conda_env.txt](./env/conda_env.txt) for detailed (but maybe not necessary) environment setup. 
-
 # Data
 The data to reproduce can be
 [found here](https://drive.google.com/drive/folders/1Hk_AJ6yhZj98uQj5KAj4jo3I1uf8pDh1?usp=sharing).
