@@ -1,78 +1,67 @@
-# [Visually Grounded Neural Syntax Acquisition](https://ttic.uchicago.edu/~freda/paper/shi2019visually.pdf)
+# Multilingual Visually Grounded Neural Syntax Acquisition
 
-[Freda Shi](https://ttic.uchicago.edu/~freda)\*, [Jiayuan Mao](http://jiayuanm.com)\*, 
-[Kevin Gimpel](https://ttic.uchicago.edu/~kgimpel), [Karen Livescu](https://ttic.uchicago.edu/~klivescu)
-
-**ACL 2019** &nbsp; **Best Paper Nominee**
-[[paper]](https://ttic.uchicago.edu/~freda/paper/shi2019visually.pdf) 
-[[project page]](https://ttic.uchicago.edu/~freda/project/vgnsl/)
-[[bib]](https://ttic.uchicago.edu/~freda/file/bib/shi2019visually.bib)
-
-![model.jpg](https://ttic.uchicago.edu/~freda/project/vgnsl/model.jpg)
+This code is based on [the repo for visually grounded neural syntax acquisition](https://github.com/ExplorerFreda/VGNSL).
 
 ## Requirements
-PyTorch >= 1.0.1 
 
-See also [env/conda_env.txt](./env/conda_env.txt) for detailed (but maybe not necessary) environment setup. 
-
-## Data Preparation
-
-Download our pre-processed data [here](https://drive.google.com/open?id=1Fpxvcs03Vycg_WaV6Z2UvDvS-2B_LgCu) and unzip it to the data folder. 
-
-To run our demo, the data folder should be organized as follows
-
-```
-data
-├── mscoco
-│   ├── dev_caps.txt
-│   ├── dev_ims.npy
-│   ├── test_caps.txt
-│   ├── test_ground-truth.txt
-│   ├── train_caps.txt
-│   ├── train_ims.npy
-│   └── vocab.pkl
-...
-```
+Doing `pip install -r requirements.txt` should get you setup with all you need.
 
 
-## Training
+# Data
+The data to reproduce can be
+[found here](https://drive.google.com/drive/folders/1Hk_AJ6yhZj98uQj5KAj4jo3I1uf8pDh1?usp=sharing).
+For each language, we explored both BERT embeddings and tokenization, and just using the
+pre-tokenized words and fasttext embeddings. 
 
-Note: The demos are **NOT** used to reproduce the numbers reported in the ACL paper. 
-To reproduce the results, we need to train multiple models and do self F1 driven model selection (see Section 4.7 for details).
-To get roughly similar numbers to the ones reported in the paper, take the 6th or 7th checkpoint of VG-NSL and the checkpoints after 20 epochs for VG-NSL+HI. 
-Thanks to [Nori](https://kojimano.github.io/) for bringing this into our attention. 
+Every path that is passed to `--data_path` below refers to the data that is downloaded
+above.
 
-VG-NSL
-```
-bash demos/demo_train.sh
-```
 
-VG-NSL+HI
-```
-bash demos/demo_train_head-initial.sh
-```
+# Commands to reproduce
 
-## Inference/Testing
-After training a model, we can test it by running 
-```
-bash demos/demo_test.sh
+Currently, the code takes in either subword tokenized input (and subword embeddings), or
+word tokenized input (and word embeddings). **In the commands below, please use the
+flags `--init_embeddings_key fasttext --init-embeddings_type partial-fixed`** if you'd
+like to use FastText embeddings(this is of course, in addition, to changing what
+`--data_dir` points to as described in the "Data" section above).
+
+The code to reproduce the results in the paper is
+in different commits. Therefore, one has to checkout specific Git commits and then 
+run the commands.
+
+## Reproduce "separate parser, separate aligner" results
+This has to be run for each language(change `multi30k_en` to something else for another
+language)
+
+Git commit: `4e691851899157d50163376e8d1706fd3fb4b18c`
+
+```bash
+python src/train.py \
+  --data_path subword/multi30k_en/ \
+  --logger_name /path/to/model/outputs/dir/ \
+  --init_embeddings_key bert \
+  --init_embeddings_type subword \
+  --init_embeddings 1 --word_dim 768 --embed_size 768 --batch_size 128 --workers 1
 ```
 
-## Citation 
-If you found the codebase useful, please consider citing
-```text
-@inproceedings{shi2019visually,
-    Title = {Visually Grounded Neural Syntax Acquisition},
-    Author = {Shi, Haoyue and Mao, Jiayuan and Gimpel, Kevin and Livescu, Karen},
-    Booktitle = {Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics},
-    Year = {2019}
-}
+## Reproduce "separate parser, common aligner" results
+Git commit: `4e691851899157d50163376e8d1706fd3fb4b18c`
+
+```bash
+python src/train.py \
+  --data_path subword/ \
+  --logger_name /path/to/model/outputs/dir/ \
+  --init_embeddings_key bert --init_embeddings_type subword --init_embeddings 1 \
+  --word_dim 768 --embed_size 768 --batch_size 128 --workers 1
 ```
 
-## Acknowledgement
-The visual-semantic embedding part is adapted from the codebase of [VSE++](https://github.com/fartashf/vsepp) (Faghri et al., BMVC 2018) and [VSE-C](https://github.com/ExplorerFreda/VSE-C) (Shi et al., COLING 2018).
-Part of the basic code is adapated from Jiayuan's personal Python toolkits [Jacinle](https://github.com/vacancy/Jacinle/) and Freda's toolkits [Witter](https://github.com/explorerfreda/witter/). 
-We also thank [Victor Silva](http://www.victorssilva.com/) for providing the original [concreteness estimation codebase](https://github.com/victorssilva/concreteness) (Hessel et al., NAACL-HLT 2018). 
+## Reproduce "Common parser, common aligner" results 
+Git commit: `0b3e6897da1d46e24c8760b9db8bd5db0179b15f`
 
-## License
-MIT  
+```bash
+python src/train.py \
+  --data_path subword/ \
+  --logger_name /path/to/model/outputs/dir/ \
+  --init_embeddings_key bert --init_embeddings_type subword --init_embeddings 1 \
+  --word_dim 768 --embed_size 768 --batch_size 128
+```
