@@ -25,6 +25,8 @@ from typing_extensions import Literal
 if TYPE_CHECKING:
     from vocab import Vocabulary
 
+# Used to indicate debug mode package wide
+DEBUG = True
 
 class EmbeddingCombiner(nn.Module):
     def __init__(self, *embeddings: nn.Module):
