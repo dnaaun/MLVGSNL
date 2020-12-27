@@ -1,13 +1,33 @@
 from __future__ import annotations
+import allennlp
+import sys
+
+from allennlp.data.fields.field import Field
+
+from allennlp.data.vocabulary import Vocabulary
 import pytorch_lightning as pl  # type: ignore
+from allennlp.data.fields import (
+    TensorField,
+    LabelField,
+    ListField,
+    TextField,
+    MetadataField,
+)
+from allennlp.data import DatasetReader, Instance
+from allennlp.data.fields import LabelField, TextField
+from allennlp.common.file_utils import TensorCache
+from allennlp.data.token_indexers import TokenIndexer, SingleIdTokenIndexer
+from allennlp.data.tokenizers import Token, Tokenizer, WhitespaceTokenizer
 from itertools import count, islice
 import csv
-from simdjson import Parser  # type: ignore
+# from simdjson import Parser  # type: ignore
+import json
 from dnips.iter.bidict import BiDict
 import json
 import base64
 from functools import cached_property
 from random import Random
+from logging import Logger, basicConfig
 import pickle as pkl
 import math
 from typing import (
@@ -46,16 +66,18 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, Sampler
 from .utils import DEBUG
 
+basicConfig()
+logger = Logger(__name__)
+
 
 class RegionFeats(NamedTuple):
-    img_id: int
-    h: int
-    w: int
+    height: int
+    width: int
 
-    bxes: np.ndarray[np.float32]
+    boxes: np.ndarray[np.float32]
     # (num_boxes, 4)
 
-    feats: np.ndarray[np.float32]
+    features: np.ndarray[np.float32]
     # num_boxesn, 2048)
 
 
@@ -65,146 +87,145 @@ class CaptionedEx(NamedTuple):
     img: Optional[RegionFeats] = None
 
 
-def _load_feats_from_tsv(feats_tsv_fps: List[Path]) -> Dict[int, RegionFeats]:
-    imgs = {}
-
-    for feats_tsv_fp in feats_tsv_fps:
-        with feats_tsv_fp.open() as f:
-            reader = csv.reader(f)
-            if DEBUG:
-                rows = islice(reader, 5000)
-            else:
-                rows = reader
-            for (
-                img_id_str,
-                w_str,
-                h_str,
-                num_boxes_str,
-                boxes_str,
-                feats_str,
-            ) in rows:
-                img_id = int(img_id_str)
-
-                num_boxes = int(num_boxes_str)
-                bxes = np.frombuffer(
-                    base64.decodestring(boxes_str.encode()), dtype=np.float32
-                ).reshape((num_boxes, -1))
-                feats = np.frombuffer(
-                    base64.decodestring(feats_str.encode()), dtype=np.float32
-                ).reshape((num_boxes, -1))
-
-                imgs[img_id] = RegionFeats(
-                    img_id=img_id, w=int(w_str), h=int(h_str), bxes=bxes, feats=feats
-                )
-
-    return imgs
-
-
-def _load_img_ids_from_tsv(feats_tsv_fps: List[Path]) -> Set[int]:
-    img_ids = []
-    for feats_tsv_fp in feats_tsv_fps:
-        with feats_tsv_fp.open() as f:
-            reader = csv.reader(f)
-            if DEBUG:
-                rows = islice(reader, 5000)
-            else:
-                rows = reader
-            for (img_id_str, _, _, _, _, _,) in rows:
-                img_ids.append(int(img_id_str))
-    return set(img_ids)
-
-
 MSCOCOCapJsonFmt = TypedDict(
     "MSCOCOCapJsonFmt", {"image_id": int, "id": int, "caption": str}
 )
 
 
-class MSCOCORegionsDataset:
+class MSCOCORegionsReader(DatasetReader):
     def __init__(
         self,
-        mscoco_jsons: Sequence[MSCOCOCapJsonFmt],
-        vocab: BiDict[str, int],
-        tokenizer: Callable[[str], List[str]],
-        tsv_fps: List[Path],
+        data_dir: Path,
+        tokenizer: Tokenizer = None,
+        caption_indexers: Dict[str, TokenIndexer] = None,
         load_feats: bool = True,
-        unk_tok: str = "<unk>",
-        pad_tok: str = "<pad>",
-        start_tok: str = "<start>",
-        end_tok: str = "<end>",
+        **kwargs: Any
     ) -> None:
-
+        super().__init__(**kwargs)
+        self._data_dir = data_dir
+        self._tokenizer = tokenizer or WhitespaceTokenizer()
+        self._token_indexers = caption_indexers or {"tokens": SingleIdTokenIndexer()}
         self._load_feats = load_feats
-        if load_feats:
-            self._imgs = _load_feats_from_tsv(tsv_fps)
-            img_ids = set(self._imgs.keys())
-        else:
-            img_ids = _load_img_ids_from_tsv(tsv_fps)
 
-        MSCOCOCapInfo = NamedTuple(
-            "MSCOCOCapInfo", [("cap", List[int]), ("id", int), ("img_id", int)]
-        )
-        self._cap_infos: List[MSCOCOCapInfo] = []
-
-        unk_id = vocab[unk_tok]
-        for mscoco_json in mscoco_jsons:
-            if mscoco_json["image_id"] not in img_ids:
-                continue
-            cap = [vocab.get(tok, unk_id) for tok in tokenizer(mscoco_json["caption"])]
-            self._cap_infos.append(
-                MSCOCOCapInfo(cap, mscoco_json["id"], mscoco_json["image_id"])
-            )
-
-    def __getitem__(self, i: int) -> CaptionedEx:
-        cap_info = self._cap_infos[i]
-
-        img = None
+    def _read(self, img_feat_tsvs: List[str]) -> Iterable[Instance]:
+        ## Parse
         if self._load_feats:
-            img = self._imgs[cap_info.img_id]
+            imgs = self._load_feats_from_tsv([Path(i) for i in img_feat_tsvs])
+            image_ids = set(imgs.keys())
+        else:
+            image_ids = self._load_image_ids_from_tsv([Path(i) for i in img_feat_tsvs])
 
-        return CaptionedEx(id=cap_info.id, cap=cap_info.cap, img=img)
+        # The Karpathy split spans across the original train and val splits.
+        # accordingly,  read all the json files in the data dir.
+        # parser = Parser()
+        for json_file in self._data_dir.glob("*.json"):
+            with open(json_file) as f:
+                # caption_infos = parser.parse(str(json_file))
+                annotations = json.load(f)["annotations"]
 
-    def __len__(self) -> int:
-        return len(self._cap_infos)
+                for annotation in annotations:
+                    if annotation["image_id"] not in image_ids:
+                        continue
+
+                    image_id = annotation["image_id"]
+                    if self._load_feats:
+                        assert imgs  # type: ignore
+                        image_attrs = imgs[image_id]._asdict()
+                    else:
+                        image_attrs = {}
+
+                    instance = self.text_to_instance(
+                        caption=annotation["caption"],
+                        caption_id=annotation["id"],
+                        image_id=image_id,
+                        **image_attrs
+                    )
+
+                    yield instance
 
 
-class MSCOCORegionsDataModule(pl.LightningDataModule):
-    def __init__(self, data_d: str, batch_size: int) -> None:
-        super().__init__()
-        self._data_d = Path(data_d)
+    def text_to_instance(
+        self,
+        caption: str,
+        caption_id: int,
+        image_id: int,
+        width: int = None,
+        height: int = None,
+        boxes: np.ndarray[np.float32] = None,
+        features: np.ndarray[np.float32] = None,
+    ) -> Instance:
+        fields: Dict[str, Field] = {
+            "caption": TextField(self._tokenizer.tokenize(caption)),
+            "metadata": MetadataField({"id": caption_id, "image_id": image_id}),
+        }
 
-    def setup(self) -> None:
-        with open(self._data_d / "vocab.txt") as f:
-            words = [self._preprocess(l.strip()) for l in f]
-            words.extend(["<unk>", "<pad>", "<start>", "<end>"])
-            self._vocab = BiDict(enumerate(words)).rev
+        if boxes is not None or width or height or features is not None:
 
-        parser = Parser()
-        with open(self._data_d / "captions.json", "b") as fb:
-            doc = parser.parse(fb.read())
-        self._mscoco_jsons = doc["annotations"]
+            if boxes is None or features is None or width is None or height is None:
+                raise Exception("Either provide all image attributes, or none of them.")
 
-    def _preprocess(self, word: str) -> str:
-        return word.lower()
+            fields["boxes"] = TensorField(boxes)
+            fields["features"] = TensorField(features)
+            fields["width"] = TensorField(torch.tensor(width))
+            fields["height"] = TensorField(torch.tensor(height))
 
-    @cached_property
-    def _train_dataset(self) -> MSCOCORegionsDataset:
-        return self._dataset(list(self._data_d.glob("*train*.tsv*")))
+        return Instance(fields)
 
-    @cached_property
-    def _val_dataset(self) -> MSCOCORegionsDataset:
-        return self._dataset(list(self._data_d.glob("*val*.tsv*")))
+    @staticmethod
+    def _load_feats_from_tsv(feats_tsv_fps: List[Path]) -> Dict[int, RegionFeats]:
 
-    @cached_property
-    def _test_dataset(self) -> MSCOCORegionsDataset:
-        return self._dataset(list(self._data_d.glob("*test*.tsv*")), load_feats=False)
+        imgs = {}
+        csv.field_size_limit(sys.maxsize)
+        for feats_tsv_fp in feats_tsv_fps:
+            with feats_tsv_fp.open() as f:
+                reader = csv.reader(f, delimiter='\t', quoting=csv.QUOTE_NONE)
+                if DEBUG:
+                    rows = islice(reader, 5000)
+                else:
+                    rows = reader
+                for (
+                    image_id_str,
+                    w_str,
+                    h_str,
+                    num_boxes_str,
+                    boxes_str,
+                    feats_str,
+                ) in rows:
+                    image_id = int(image_id_str)
 
-    def _dataset(
-        self, tsv_fps: List[Path], load_feats: bool = True
-    ) -> MSCOCORegionsDataset:
-        return MSCOCORegionsDataset(
-            self._mscoco_jsons,
-            self._vocab,
-            self._tokenize,
-            tsv_fps,
-            load_feats=load_feats,
-        )
+                    num_boxes = int(num_boxes_str)
+                    boxes = np.frombuffer(
+                        base64.decodebytes(boxes_str.encode()), dtype=np.float32
+                    ).reshape((num_boxes, -1))
+                    features = np.frombuffer(
+                        base64.decodebytes(feats_str.encode()), dtype=np.float32
+                    ).reshape((num_boxes, -1))
+
+                    # Copy, since a torch.from_numpy call later doens't like these 
+                    # read only numpy arrays that come np.frombuffer
+                    boxes = np.copy(boxes)
+                    features = np.copy(features)
+
+                    imgs[image_id] = RegionFeats(
+                        width=int(w_str),
+                        height=int(h_str),
+                        boxes=boxes,
+                        features=features,
+                    )
+
+        return imgs
+
+    @staticmethod
+    def _load_image_ids_from_tsv(feats_tsv_fps: List[Path]) -> Set[int]:
+        image_ids = []
+        csv.field_size_limit(sys.maxsize)
+        for feats_tsv_fp in feats_tsv_fps:
+            with feats_tsv_fp.open() as f:
+                reader = csv.reader(f)
+                if DEBUG:
+                    rows = islice(reader, 5000)
+                else:
+                    rows = reader
+                for (image_id_str, _, _, _, _, _,) in rows:
+                    image_ids.append(int(image_id_str))
+        return set(image_ids)

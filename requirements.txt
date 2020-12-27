@@ -1,13 +1,15 @@
-nltk==3.5
+allennlp==1.3.0
+bounding-box
+dnips==0.1
+en-core-web-sm==2.3.1
+typer==0.3.2
+
+# Dev requirements
+black==20.8b1
+tqdm-stubs==0.1
+torch-stubs==0.1
+readline==6.2.4.1
+pynvim==0.4.2
+ipdb==0.13.4
+mypy==0.790
 pip-chill==1.0.0
-pycocotools==2.0.2
-torchvision==0.7.0
-more_itertools
-typer
-lazy_import
-git+https://github.com/udnaan/self-attentive-parser#egg=benepar
-tensorflow
-typing_extensions
-transformers
-word2word
-stanza
